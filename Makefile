@@ -2,7 +2,7 @@
 
 BUILD_DIR ?= $(CURDIR)/build
 
-.PHONY: all userspace module clean
+.PHONY: all userspace module examples-lvgl clean
 
 all: userspace
 
@@ -13,7 +13,11 @@ userspace:
 module:
 	$(MAKE) -C kernel
 
+examples-lvgl:
+	$(MAKE) -C examples/lvgl BUILD_DIR=$(BUILD_DIR)/examples
+
 clean:
 	$(MAKE) -C userspace BUILD_DIR=$(BUILD_DIR) clean
 	$(MAKE) -C tools BUILD_DIR=$(BUILD_DIR) clean
+	$(MAKE) -C examples/lvgl BUILD_DIR=$(BUILD_DIR)/examples clean
 	$(MAKE) -C kernel clean

@@ -47,6 +47,9 @@ The ring is allocated with `vmalloc_user()` so Linux 4.15 accepts the standard
 structure sizes and an ABI version so fields can be appended without forcing
 unrelated backends to change.
 
+Backends may request a periodic `tick` callback. This keeps control traffic
+alive even when fbdev or DRM has not published a new frame.
+
 A backend owns all protocol-specific work:
 
 - pixel conversion and compression;
@@ -58,6 +61,12 @@ A backend owns all protocol-specific work:
 No vendor protocol is added to the kernel module. Adding another adapter
 normally requires a new directory under `backends/`, not a new framebuffer
 driver.
+
+The Actions Micro backend follows this boundary: it extracts only command
+reports from an authorized replay template, verifies both HID interfaces,
+sends initialization, schedules `_PPA` keepalives, runs a persistent FFmpeg
+H.264 encoder, and fragments `RRIM/TADV` video messages. None of those details
+are present in the kernel module or application examples.
 
 ## Failure boundaries
 

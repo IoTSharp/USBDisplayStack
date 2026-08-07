@@ -2,6 +2,7 @@
 
 /build/
 /dist/
+/graphify-out/
 *.o
 *.ko
 *.mod
@@ -14,6 +15,8 @@ modules.order
 Module.symvers
 __pycache__/
 *.pyc
+bin/
+obj/
 .vscode/
 .idea/
 .DS_Store

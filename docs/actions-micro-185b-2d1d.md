@@ -11,9 +11,15 @@ reference host displayed the captured Windows desktop. On 2026-08-07 this
 software replay woke the HDMI output without pressing the adapter's physical
 button. The replay contained 17 command reports and 1,234 video reports over
 4.968 seconds. This verifies the HID paths and captured initialization
-sequence. Newly encoded H.264 has not yet been visually accepted by the
-adapter, so USBDisplayStack does not claim live hardware support and does not
-install a default backend for this device.
+sequence.
+
+USBDisplayStack now includes an experimental live backend that owns
+initialization, `_PPA` keepalives, FFmpeg H.264 encoding, `RRIM/TADV`
+encapsulation, and alternating HID report delivery. On 2026-08-07, after a
+physical USB power cycle, `bootstrap=full` handed off from an authorized replay
+to newly encoded 1920x1080 LVGL output and the HDMI pixels were visually
+confirmed. The backend remains experimental pending repeated reconnect and
+long-running tests, so it is installed but is not selected by default.
 
 ## Observed framing
 
@@ -67,13 +73,57 @@ Replay data is not distributed because it contains captured vendor messages
 and captured screen video. Users must capture data from hardware they are
 authorized to analyze.
 
-## Work required for a live backend
+## Live backend
 
-- reproduce the exact decoder configuration accepted by the firmware;
-- send the captured initialization sequence when the backend opens, before
-  submitting generated video;
-- encode framebuffer input with bounded latency and correct color conversion;
-- schedule initialization, keepalive, and video reports across both HID paths;
+Build `usbdisplay-actions-micro.so` with the normal userspace target. The
+backend requires an authorized `DPRPL001` replay template. It validates the
+whole container. By default it retains only command reports: commands before
+the first video report form the initialization sequence, and single-fragment
+`_PPA` commands after video starts form the heartbeat cycle. Captured video
+bytes are not sent in this default mode.
+
+```bash
+build/usb-displayd \
+  --device /dev/usbdisplay0 \
+  --backend build/usbdisplay-actions-micro.so \
+  --backend-option template=/path/to/authorized.replay
+```
+
+The backend automatically discovers the two `185b:2d1d` hidraw nodes and
+verifies physical `input0` and `input1` before the first write. Device numbers
+can be pinned when required:
+
+```text
+template=PATH,hid0=/dev/hidraw2,hid1=/dev/hidraw3,encoder=ffmpeg,fps=30,fragment-us=500,encode-timeout-ms=2000,bootstrap=none
+```
+
+Some firmware revisions do not leave their waiting page after the command-only
+initialization. For those devices, `bootstrap=full` explicitly sends the entire
+authorized replay once, preserving its timing, command sequence, video
+sequence, and alternating-HID position. The next live configuration and IDR
+messages continue in the same transport session, and keepalives resume from the
+captured cycle with command endpoints continuing to alternate. This mode sends
+the captured screen data contained in the template and is therefore never
+enabled implicitly:
+
+```bash
+build/usb-displayd \
+  --device /dev/usbdisplay0 \
+  --backend build/usbdisplay-actions-micro.so \
+  --backend-option template=/path/to/authorized.replay,bootstrap=full
+```
+
+The virtual mode must have even dimensions because the current encoder output
+is baseline H.264 in `yuv420p`. XRGB8888 and RGB565 input are accepted.
+Encoded NAL units are normalized to four-byte Annex-B start codes before
+transport, matching the captured stream accepted by the adapter.
+Initialization preserves captured relative timing. Heartbeats continue through
+the backend ABI's idle `tick`, including while the screen is static. Any HID,
+encoder, timeout, or protocol failure terminates the daemon so systemd can
+restart the complete activation sequence.
+
+## Remaining validation work
+
 - handle hotplug, status input, backpressure, and frame dropping;
-- validate cold boot, reconnect, and long-running behavior;
-- confirm output visually on hardware before changing the support status.
+- repeat physical power-cycle and reconnect tests;
+- validate long-running behavior.

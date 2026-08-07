@@ -32,6 +32,8 @@ install -m 0755 "$package_dir/lib/usbdisplay-null.so" \
 	/usr/lib/usbdisplay/usbdisplay-null.so
 install -m 0755 "$package_dir/lib/usbdisplay-ppm.so" \
 	/usr/lib/usbdisplay/usbdisplay-ppm.so
+install -m 0755 "$package_dir/lib/usbdisplay-actions-micro.so" \
+	/usr/lib/usbdisplay/usbdisplay-actions-micro.so
 install -m 0644 "$package_dir/packaging/usb-displayd.service" \
 	/usr/lib/systemd/system/usb-displayd.service
 install -m 0644 "$package_dir/packaging/60-usbdisplay.rules" \

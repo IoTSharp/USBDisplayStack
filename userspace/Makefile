@@ -9,10 +9,11 @@ CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC
 DAEMON := $(BUILD_DIR)/usb-displayd
 NULL_BACKEND := $(BUILD_DIR)/usbdisplay-null.so
 PPM_BACKEND := $(BUILD_DIR)/usbdisplay-ppm.so
+ACTIONS_MICRO_BACKEND := $(BUILD_DIR)/usbdisplay-actions-micro.so
 
 .PHONY: all clean
 
-all: $(DAEMON) $(NULL_BACKEND) $(PPM_BACKEND)
+all: $(DAEMON) $(NULL_BACKEND) $(PPM_BACKEND) $(ACTIONS_MICRO_BACKEND)
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -26,5 +27,10 @@ $(NULL_BACKEND): ../backends/null/null_backend.c | $(BUILD_DIR)
 $(PPM_BACKEND): ../backends/ppm/ppm_backend.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared $< -o $@
 
+$(ACTIONS_MICRO_BACKEND): \
+	../backends/actions-micro/actions_micro_backend.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -shared $< -o $@
+
 clean:
-	rm -f $(DAEMON) $(NULL_BACKEND) $(PPM_BACKEND)
+	rm -f $(DAEMON) $(NULL_BACKEND) $(PPM_BACKEND) \
+		$(ACTIONS_MICRO_BACKEND)

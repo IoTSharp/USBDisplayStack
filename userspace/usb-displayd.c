@@ -12,14 +12,29 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <usbdisplay/backend.h>
 #include <usbdisplay/uapi.h>
 
 #define DEFAULT_DEVICE "/dev/usbdisplay0"
+#define BACKEND_TICK_INTERVAL_MS 100
 
 static volatile sig_atomic_t stop_requested;
+
+static uint64_t monotonic_nanoseconds(void)
+{
+	struct timespec value;
+	uint64_t result = 0;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &value) == 0) {
+		result = (uint64_t)value.tv_sec * 1000000000ULL;
+		result += (uint64_t)value.tv_nsec;
+	}
+
+	return result;
+}
 
 static void handle_signal(int signal_number)
 {
@@ -101,7 +116,7 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 	descriptor.events = POLLIN;
 	descriptor.revents = 0;
 	while (!stop_requested && result == 0) {
-		poll_result = poll(&descriptor, 1, 1000);
+		poll_result = poll(&descriptor, 1, BACKEND_TICK_INTERVAL_MS);
 		if (poll_result < 0) {
 			if (errno != EINTR) {
 				result = -errno;
@@ -139,6 +154,13 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 		} else if (poll_result > 0 &&
 			   (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
 			result = -EIO;
+		}
+		if (result == 0 &&
+		    (backend->capabilities & USBDISPLAY_BACKEND_CAP_TICK) != 0 &&
+		    backend->struct_size >= USBDISPLAY_BACKEND_V1_TICK_SIZE &&
+		    backend->tick != NULL) {
+			result = backend->tick(backend_context,
+					       monotonic_nanoseconds());
 		}
 	}
 
@@ -188,6 +210,14 @@ int main(int argc, char **argv)
 			    backend->close == NULL) {
 				fprintf(stderr, "usb-displayd: incompatible backend ABI\n");
 				result = -EPROTO;
+			} else if ((backend->capabilities &
+				    USBDISPLAY_BACKEND_CAP_TICK) != 0 &&
+				   (backend->struct_size <
+				    USBDISPLAY_BACKEND_V1_TICK_SIZE ||
+				    backend->tick == NULL)) {
+				fprintf(stderr,
+					"usb-displayd: backend tick capability is invalid\n");
+				result = -EPROTO;
 			}
 		}
 	}
@@ -225,6 +255,7 @@ int main(int argc, char **argv)
 	if (result == 0) {
 		signal(SIGINT, handle_signal);
 		signal(SIGTERM, handle_signal);
+		signal(SIGPIPE, SIG_IGN);
 		fprintf(stderr, "usb-displayd: %s -> %s (%ux%u)\n", device_path,
 			backend->name, info.width, info.height);
 		result = run_loop(device_fd, &info, mapping, backend,

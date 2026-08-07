@@ -10,6 +10,7 @@
 #define USBDISPLAY_BACKEND_ABI_VERSION 1U
 #define USBDISPLAY_BACKEND_ENTRY "usbdisplay_backend_v1"
 #define USBDISPLAY_BACKEND_CAP_NONE 0U
+#define USBDISPLAY_BACKEND_CAP_TICK (1ULL << 0)
 
 struct usbdisplay_backend_config {
 	uint32_t struct_size;
@@ -43,11 +44,16 @@ struct usbdisplay_backend_v1 {
 	int (*open)(const struct usbdisplay_backend_config *config, void **context);
 	int (*submit)(void *context, const struct usbdisplay_frame *frame);
 	void (*close)(void *context);
+	int (*tick)(void *context, uint64_t now_ns);
 };
 
 #define USBDISPLAY_BACKEND_V1_REQUIRED_SIZE \
 	(offsetof(struct usbdisplay_backend_v1, close) + \
 	 sizeof(((struct usbdisplay_backend_v1 *)0)->close))
+
+#define USBDISPLAY_BACKEND_V1_TICK_SIZE \
+	(offsetof(struct usbdisplay_backend_v1, tick) + \
+	 sizeof(((struct usbdisplay_backend_v1 *)0)->tick))
 
 typedef const struct usbdisplay_backend_v1 *(*usbdisplay_backend_entry_fn)(void);
 

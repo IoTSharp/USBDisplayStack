@@ -23,6 +23,7 @@ rm -f \
 	/usr/bin/usbdisplay-drm-probe \
 	/usr/lib/usbdisplay/usbdisplay-null.so \
 	/usr/lib/usbdisplay/usbdisplay-ppm.so \
+	/usr/lib/usbdisplay/usbdisplay-actions-micro.so \
 	/usr/lib/systemd/system/usb-displayd.service \
 	/etc/udev/rules.d/60-usbdisplay.rules \
 	/etc/modules-load.d/usbdisplay.conf \

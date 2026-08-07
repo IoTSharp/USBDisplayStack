@@ -38,6 +38,13 @@ The returned table must provide matching `abi_version`, a compatible
 may only be appended. A semantic or layout break requires a new entry point
 and ABI version.
 
+Version 1 optionally exposes `tick(context, monotonic_now_ns)` at the end of
+the table. A backend that sets `USBDISPLAY_BACKEND_CAP_TICK` must include the
+field in `struct_size` and provide the callback. The daemon calls it at least
+every 100 ms while idle and after frame processing, allowing keepalives and
+transport health checks to continue when the displayed image is static. Old
+backends whose table ends at `close` remain compatible.
+
 `submit` runs synchronously. A backend should either complete promptly or
 implement its own bounded queue. Holding the call indefinitely prevents the
 daemon from advancing to newer snapshots.

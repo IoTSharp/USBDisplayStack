@@ -6,4 +6,9 @@ USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-null.so
 # Example PPM diagnostic output:
 # USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-ppm.so
 # USBDISPLAY_BACKEND_ARGS=--backend-option /tmp/usbdisplay.ppm
+
+# Actions Micro 185b:2d1d (requires ffmpeg with libx264 and an authorized
+# replay template containing initialization and heartbeat commands):
+# USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-actions-micro.so
+# USBDISPLAY_BACKEND_ARGS=--backend-option template=/var/lib/usbdisplay/actions-micro.replay
 USBDISPLAY_BACKEND_ARGS=

@@ -14,6 +14,7 @@ kernel_build_dir=${KDIR:-/lib/modules/$kernel_release/build}
 module_dir=/lib/modules/$kernel_release/extra
 
 if [ ! -x "$project_dir/build/usb-displayd" ] ||
+   [ ! -f "$project_dir/build/usbdisplay-actions-micro.so" ] ||
    [ ! -f "$project_dir/kernel/usbdisplay.ko" ]; then
 	make -C "$project_dir" userspace
 	make -C "$project_dir" module KDIR="$kernel_build_dir"
@@ -32,6 +33,8 @@ install -m 0755 "$project_dir/build/usbdisplay-null.so" \
 	/usr/lib/usbdisplay/usbdisplay-null.so
 install -m 0755 "$project_dir/build/usbdisplay-ppm.so" \
 	/usr/lib/usbdisplay/usbdisplay-ppm.so
+install -m 0755 "$project_dir/build/usbdisplay-actions-micro.so" \
+	/usr/lib/usbdisplay/usbdisplay-actions-micro.so
 
 install -d /usr/lib/systemd/system /etc/udev/rules.d /etc/modules-load.d \
 	/etc/modprobe.d /etc/default
