@@ -151,6 +151,10 @@ USBDISPLAY_BACKEND_ARGS=--backend-option template=/var/lib/usbdisplay/actions-mi
 画面和实时生成的 LVGL 画面均已在参考设备上显示；后端仍需完成重复重连和
 长时间运行验证，因此继续标记为实验性。
 
+完整的硬件型号、USB ID 和验证状态参见[支持设备清单](docs/supported-devices.zh-CN.md)。
+
+![绿联 USB 转 HDMI 转换器](docs/assets/devices/ugreen-usb-hdmi-185b-2d1d.png)
+
 ## 许可证
 
 USBDisplayStack 使用 `GPL-2.0-only` 许可证，详见 [LICENSE](LICENSE)。

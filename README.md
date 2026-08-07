@@ -162,8 +162,11 @@ The backend discovers and verifies both `185b:2d1d` hidraw interfaces, sends
 initialization, maintains heartbeats while idle, and converts new fbdev or DRM
 frames into baseline H.264 and vendor HID reports. With the module and service
 running, an LVGL write to the USBDisplayStack framebuffer automatically enters
-that pipeline. See [Actions Micro 185b:2d1d](docs/actions-micro-185b-2d1d.md)
-for options and current validation limits.
+that pipeline. See the [supported device list](docs/supported-devices.md) and
+[Actions Micro 185b:2d1d](docs/actions-micro-185b-2d1d.md) for the matching USB
+identity, options, and current validation limits.
+
+![UGREEN USB-to-HDMI adapter](docs/assets/devices/ugreen-usb-hdmi-185b-2d1d.png)
 
 ## Experimental hardware work
 

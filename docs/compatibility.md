@@ -37,7 +37,7 @@ Known project status:
 | --- | --- |
 | Null backend | Working; diagnostics only |
 | PPM backend | Working; end-to-end frame verification |
-| Actions Micro `185b:2d1d` | Experimental live backend; full-bootstrap 1920x1080 LVGL output visually verified on the reference unit; repeated hotplug and long-running tests remain |
+| [UGREEN USB-to-HDMI adapter](supported-devices.md) (`185b:2d1d`) | Experimental live backend; full-bootstrap 1920x1080 LVGL output visually verified on the reference unit; repeated hotplug and long-running tests remain |
 | DisplayLink/EVDI | Not used by this project |
 | MacroSilicon MS912x/MS9132 | Different protocol; not supported |
 
