@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.replay binary
+*.pcap binary
+*.h264 binary

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+# The null backend verifies frame flow without touching USB hardware.
+USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-null.so
+
+# Example PPM diagnostic output:
+# USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-ppm.so
+# USBDISPLAY_BACKEND_ARGS=--backend-option /tmp/usbdisplay.ppm
+USBDISPLAY_BACKEND_ARGS=

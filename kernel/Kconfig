@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config DRM_USBDISPLAY
+	tristate "USBDisplayStack virtual display frontend"
+	depends on DRM && DRM_KMS_HELPER && DRM_TINYDRM
+	depends on FB && FB_DEFERRED_IO
+	help
+	  Creates a virtual DRM/KMS card, an independent fbdev, and a
+	  triple-buffer stream for userspace USB display protocol backends.

@@ -1,0 +1,17 @@
+[Unit]
+Description=USBDisplayStack frame transport daemon
+After=systemd-modules-load.service
+ConditionPathExists=/dev/usbdisplay0
+
+[Service]
+Type=simple
+Environment=USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-null.so
+Environment=USBDISPLAY_BACKEND_ARGS=
+EnvironmentFile=-/etc/default/usb-displayd
+ExecStart=/usr/bin/usb-displayd --device /dev/usbdisplay0 --backend ${USBDISPLAY_BACKEND} $USBDISPLAY_BACKEND_ARGS
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
