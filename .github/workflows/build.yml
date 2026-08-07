@@ -8,7 +8,7 @@ jobs:
   userspace:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build userspace and tools
         run: make userspace
       - name: Smoke-test plugin loading
@@ -18,9 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:18.04
     steps:
-      - uses: actions/checkout@v3
       - name: Install Linux 4.15 build dependencies
-        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential linux-headers-generic
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates git linux-headers-generic
+      - name: Check out the triggering revision
+        run: |
+          git init .
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
       - name: Build module
         run: |
           KDIR=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
