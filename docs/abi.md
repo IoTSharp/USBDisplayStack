@@ -45,6 +45,12 @@ every 100 ms while idle and after frame processing, allowing keepalives and
 transport health checks to continue when the displayed image is static. Old
 backends whose table ends at `close` remain compatible.
 
+`USBDISPLAY_BACKEND_CAP_PHYSICAL` declares that a backend owns a real display
+transport rather than a diagnostic sink. The daemon records this capability as
+`physical=1` in its readiness file after `open` succeeds. Consumers that drive
+real displays must require that value; the null and PPM backends intentionally
+leave the capability clear and publish `physical=0`.
+
 `submit` runs synchronously. A backend should either complete promptly or
 implement its own bounded queue. Holding the call indefinitely prevents the
 daemon from advancing to newer snapshots.

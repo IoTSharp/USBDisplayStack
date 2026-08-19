@@ -19,7 +19,9 @@ encapsulation, and alternating HID report delivery. On 2026-08-07, after a
 physical USB power cycle, `bootstrap=full` handed off from an authorized replay
 to newly encoded 1920x1080 LVGL output and the HDMI pixels were visually
 confirmed. The backend remains experimental pending repeated reconnect and
-long-running tests, so it is installed but is not selected by default.
+long-running tests. The host daemon now clears its readiness marker on
+disconnect and waits for the same adapter to reappear instead of relying on a
+rapid systemd restart loop.
 
 ## Observed framing
 
@@ -124,6 +126,6 @@ restart the complete activation sequence.
 
 ## Remaining validation work
 
-- handle hotplug, status input, backpressure, and frame dropping;
+- handle status input, backpressure, and frame dropping;
 - repeat physical power-cycle and reconnect tests;
 - validate long-running behavior.

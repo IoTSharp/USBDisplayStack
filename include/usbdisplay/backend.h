@@ -11,6 +11,8 @@
 #define USBDISPLAY_BACKEND_ENTRY "usbdisplay_backend_v1"
 #define USBDISPLAY_BACKEND_CAP_NONE 0U
 #define USBDISPLAY_BACKEND_CAP_TICK (1ULL << 0)
+/* The backend owns a physical display transport, not only a diagnostic sink. */
+#define USBDISPLAY_BACKEND_CAP_PHYSICAL (1ULL << 1)
 
 struct usbdisplay_backend_config {
 	uint32_t struct_size;

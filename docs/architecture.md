@@ -50,6 +50,13 @@ unrelated backends to change.
 Backends may request a periodic `tick` callback. This keeps control traffic
 alive even when fbdev or DRM has not published a new frame.
 
+The daemon publishes a PID-bearing readiness file after the backend opens. The
+file also carries `physical=1` only for a backend that owns a physical display
+transport; diagnostic backends publish `physical=0`. On a backend open or
+submit failure it removes the file, closes the backend, and retries in the same
+process. Real display consumers must require both a live daemon PID and
+`physical=1`; the virtual framebuffer can exist while no USB adapter is present.
+
 A backend owns all protocol-specific work:
 
 - pixel conversion and compression;
@@ -71,8 +78,8 @@ are present in the kernel module or application examples.
 ## Failure boundaries
 
 - Only one daemon may open `/dev/usbdisplay0` at a time.
-- A missing or failed backend terminates the daemon; it does not affect fb0.
-- A disconnected USB adapter is a backend error; there is no primary-display
-  fallback.
+- A missing backend library is fatal, but a physical backend open or submit
+  failure clears readiness and enters the bounded reconnect wait.
+- A disconnected USB adapter never falls back to the primary display.
 - Module unload unregisters fbdev, the misc device, and DRM before releasing
   their memory.

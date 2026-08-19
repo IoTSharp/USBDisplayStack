@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep the transport daemon alive while the selected USB backend is absent or
+  disconnected; publish a PID-checked readiness marker for framebuffer clients.
+- Mark readiness with the backend's physical-transport capability so diagnostic
+  null/PPM backends cannot activate the real second-screen consumer.
+- Rate-limit missing-adapter diagnostics through the daemon's retry reporting
+  instead of emitting backend discovery and empty-close messages every retry.
+- Add explicit reconnect and virtual-device path handling to the systemd service
+  so a missing UGREEN adapter cannot be mistaken for a ready display.
 - Add the experimental Actions Micro `185b:2d1d` live backend with replay-
   derived initialization and heartbeat templates, FFmpeg H.264 encoding, and
   dual-hidraw video delivery.

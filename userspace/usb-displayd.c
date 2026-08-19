@@ -20,6 +20,8 @@
 
 #define DEFAULT_DEVICE "/dev/usbdisplay0"
 #define BACKEND_TICK_INTERVAL_MS 100
+#define DEFAULT_BACKEND_RETRY_MS 2000U
+#define DEFAULT_READY_FILE "/run/usbdisplay/ready"
 
 static volatile sig_atomic_t stop_requested;
 
@@ -45,19 +47,25 @@ static void handle_signal(int signal_number)
 static void print_usage(const char *program)
 {
 	fprintf(stderr,
-		"Usage: %s --backend PATH [--device PATH] [--backend-option VALUE]\n",
+		"Usage: %s --backend PATH [--device PATH] "
+		"[--backend-option VALUE] [--ready-file PATH] [--retry-ms N]\n",
 		program);
 }
 
 static int parse_arguments(int argc, char **argv, const char **device_path,
-			   const char **backend_path, const char **backend_option)
+			   const char **backend_path, const char **backend_option,
+			   const char **ready_file, unsigned int *retry_ms)
 {
 	int index;
 	int result = 0;
+	char *end = NULL;
+	unsigned long parsed;
 
 	*device_path = DEFAULT_DEVICE;
 	*backend_path = NULL;
 	*backend_option = NULL;
+	*ready_file = DEFAULT_READY_FILE;
+	*retry_ms = DEFAULT_BACKEND_RETRY_MS;
 	for (index = 1; index < argc && result == 0; ++index) {
 		if (strcmp(argv[index], "--device") == 0 && index + 1 < argc) {
 			*device_path = argv[++index];
@@ -67,6 +75,19 @@ static int parse_arguments(int argc, char **argv, const char **device_path,
 		} else if (strcmp(argv[index], "--backend-option") == 0 &&
 			   index + 1 < argc) {
 			*backend_option = argv[++index];
+		} else if (strcmp(argv[index], "--ready-file") == 0 &&
+			   index + 1 < argc) {
+			*ready_file = argv[++index];
+		} else if (strcmp(argv[index], "--retry-ms") == 0 &&
+			   index + 1 < argc) {
+			errno = 0;
+			parsed = strtoul(argv[++index], &end, 10);
+			if (errno != 0 || end == argv[index] || *end != '\0' ||
+			    parsed == 0 || parsed > 60000U) {
+				result = -EINVAL;
+			} else {
+				*retry_ms = (unsigned int)parsed;
+			}
 		} else {
 			result = -EINVAL;
 		}
@@ -76,6 +97,104 @@ static int parse_arguments(int argc, char **argv, const char **device_path,
 	}
 
 	return result;
+}
+
+/* 物理后端断开时保持一个进程等待，避免 systemd 每两秒重复创建守护进程。 */
+static int sleep_milliseconds(unsigned int milliseconds)
+{
+	struct timespec delay;
+	int result = 0;
+
+	delay.tv_sec = (time_t)(milliseconds / 1000U);
+	delay.tv_nsec = (long)(milliseconds % 1000U) * 1000000L;
+	while (!stop_requested && result == 0 && nanosleep(&delay, &delay) != 0) {
+		if (errno != EINTR) {
+			result = -errno;
+		}
+	}
+
+	return result;
+}
+
+static int write_all(int descriptor, const char *buffer, size_t length)
+{
+	size_t written_total = 0;
+	ssize_t written;
+	int result = 0;
+
+	while (written_total < length && result == 0) {
+		written = write(descriptor, buffer + written_total,
+				length - written_total);
+		if (written < 0 && errno == EINTR) {
+			continue;
+		}
+		if (written < 0) {
+			result = -errno;
+		} else if (written == 0) {
+			result = -EIO;
+		} else {
+			written_total += (size_t)written;
+		}
+	}
+
+	return result;
+}
+
+/* 就绪文件同时携带守护进程 PID，副屏进程可以拒绝陈旧标记。 */
+static int publish_ready_file(const char *ready_file, const char *backend_name,
+			      bool physical)
+{
+	char contents[256];
+	char temporary_file[320];
+	int descriptor = -1;
+	int length;
+	int temporary_length;
+	int result = 0;
+
+	if (ready_file != NULL && ready_file[0] != '\0') {
+		temporary_length = snprintf(temporary_file, sizeof(temporary_file),
+					"%s.tmp.%ld", ready_file, (long)getpid());
+		if (temporary_length < 0 ||
+		    (size_t)temporary_length >= sizeof(temporary_file)) {
+			result = -ENAMETOOLONG;
+		}
+		if (result == 0) {
+			descriptor = open(temporary_file, O_WRONLY | O_CREAT | O_TRUNC |
+					  O_CLOEXEC, 0644);
+		}
+		if (result == 0 && descriptor < 0) {
+			result = -errno;
+		}
+		if (result == 0) {
+			length = snprintf(contents, sizeof(contents),
+					"pid=%ld\nbackend=%s\nphysical=%u\n",
+					(long)getpid(), backend_name != NULL ? backend_name : "unknown",
+					physical ? 1U : 0U);
+			if (length < 0 || (size_t)length >= sizeof(contents)) {
+				result = -EOVERFLOW;
+			} else {
+				result = write_all(descriptor, contents, (size_t)length);
+			}
+			if (close(descriptor) != 0 && result == 0) {
+				result = -errno;
+			}
+			if (result == 0 && rename(temporary_file, ready_file) != 0) {
+				result = -errno;
+			}
+			if (result != 0) {
+				(void)unlink(temporary_file);
+			}
+		}
+	}
+
+	return result;
+}
+
+static void remove_ready_file(const char *ready_file)
+{
+	if (ready_file != NULL && ready_file[0] != '\0') {
+		(void)unlink(ready_file);
+	}
 }
 
 static int validate_update(const struct usbdisplay_device_info *info,
@@ -172,6 +291,8 @@ int main(int argc, char **argv)
 	const char *device_path;
 	const char *backend_path;
 	const char *backend_option;
+	const char *ready_file;
+	unsigned int retry_ms;
 	struct usbdisplay_device_info info;
 	struct usbdisplay_backend_config backend_config;
 	usbdisplay_backend_entry_fn backend_entry;
@@ -181,9 +302,12 @@ int main(int argc, char **argv)
 	void *mapping = MAP_FAILED;
 	int device_fd = -1;
 	int result;
+	int open_result;
+	int loop_result;
+	unsigned int retry_count = 0U;
 
 	result = parse_arguments(argc, argv, &device_path, &backend_path,
-				 &backend_option);
+				 &backend_option, &ready_file, &retry_ms);
 	if (result != 0) {
 		print_usage(argv[0]);
 	} else {
@@ -250,16 +374,57 @@ int main(int argc, char **argv)
 		backend_config.option = backend_option;
 		backend_config.device_width = info.width;
 		backend_config.device_height = info.height;
-		result = backend->open(&backend_config, &backend_context);
-	}
-	if (result == 0) {
 		signal(SIGINT, handle_signal);
 		signal(SIGTERM, handle_signal);
 		signal(SIGPIPE, SIG_IGN);
-		fprintf(stderr, "usb-displayd: %s -> %s (%ux%u)\n", device_path,
-			backend->name, info.width, info.height);
-		result = run_loop(device_fd, &info, mapping, backend,
-				  backend_context);
+		fprintf(stderr, "usb-displayd: waiting for %s (%ums retry)\n",
+			backend->name, retry_ms);
+		while (result == 0 && !stop_requested) {
+			backend_context = NULL;
+			open_result = backend->open(&backend_config, &backend_context);
+			if (open_result != 0) {
+				if (retry_count == 0U || retry_count % 5U == 0U) {
+					fprintf(stderr,
+						"usb-displayd: backend unavailable: %s\n",
+						strerror(-open_result));
+				}
+				retry_count += 1U;
+				result = sleep_milliseconds(retry_ms);
+			} else {
+				retry_count = 0U;
+				result = publish_ready_file(ready_file, backend->name,
+						(backend->capabilities &
+						 USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0);
+				if (result != 0) {
+					fprintf(stderr,
+						"usb-displayd: cannot publish readiness: %s\n",
+						strerror(-result));
+					backend->close(backend_context);
+					backend_context = NULL;
+				} else {
+					fprintf(stderr,
+						"usb-displayd: %s -> %s (%ux%u) ready\n",
+						device_path, backend->name, info.width, info.height);
+					loop_result = run_loop(device_fd, &info, mapping, backend,
+						backend_context);
+					remove_ready_file(ready_file);
+					backend->close(backend_context);
+					backend_context = NULL;
+					if (loop_result != 0 && !stop_requested) {
+						fprintf(stderr,
+							"usb-displayd: transport lost: %s\n",
+							strerror(-loop_result));
+						result = sleep_milliseconds(retry_ms);
+					} else {
+						result = 0;
+					}
+				}
+			}
+		}
+		remove_ready_file(ready_file);
+		if (stop_requested) {
+			result = 0;
+		}
 	}
 
 	if (backend != NULL && backend_context != NULL) {

@@ -5,10 +5,13 @@ ConditionPathExists=/dev/usbdisplay0
 
 [Service]
 Type=simple
+RuntimeDirectory=usbdisplay
+RuntimeDirectoryMode=0755
 Environment=USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-null.so
 Environment=USBDISPLAY_BACKEND_ARGS=
 EnvironmentFile=-/etc/default/usb-displayd
-ExecStart=/usr/bin/usb-displayd --device /dev/usbdisplay0 --backend ${USBDISPLAY_BACKEND} $USBDISPLAY_BACKEND_ARGS
+ExecStartPre=/bin/rm -f /run/usbdisplay/ready
+ExecStart=/usr/bin/usb-displayd --device /dev/usbdisplay0 --backend ${USBDISPLAY_BACKEND} $USBDISPLAY_BACKEND_ARGS --ready-file /run/usbdisplay/ready --retry-ms 2000
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

@@ -545,12 +545,6 @@ static int open_hidraw(const char *configured_path, int expected_input,
 		close(descriptor);
 		descriptor = -1;
 	}
-	if (result != 0) {
-		fprintf(stderr,
-			"actions-micro: cannot find 185b:2d1d input%d: %s\n",
-			expected_input, strerror(-result));
-	}
-
 	return result == 0 ? descriptor : result;
 }
 
@@ -1238,10 +1232,12 @@ static void actions_close(void *context)
 		if (state->hid[0] >= 0) {
 			close(state->hid[0]);
 		}
-		fprintf(stderr,
-			"actions-micro: closed frames=%llu reports=%llu\n",
-			(unsigned long long)state->frames,
-			(unsigned long long)state->reports);
+		if (state->frames != 0 || state->reports != 0) {
+			fprintf(stderr,
+				"actions-micro: closed frames=%llu reports=%llu\n",
+				(unsigned long long)state->frames,
+				(unsigned long long)state->reports);
+		}
 		free(state->encoder.encoded);
 		free(state->encoder.packed_frame);
 		free(state->bootstrap);
@@ -1327,7 +1323,8 @@ static int actions_open(const struct usbdisplay_backend_config *config,
 static const struct usbdisplay_backend_v1 actions_backend = {
 	.abi_version = USBDISPLAY_BACKEND_ABI_VERSION,
 	.struct_size = sizeof(struct usbdisplay_backend_v1),
-	.capabilities = USBDISPLAY_BACKEND_CAP_TICK,
+	.capabilities = USBDISPLAY_BACKEND_CAP_TICK |
+			USBDISPLAY_BACKEND_CAP_PHYSICAL,
 	.name = "actions-micro-185b-2d1d",
 	.open = actions_open,
 	.submit = actions_submit,
