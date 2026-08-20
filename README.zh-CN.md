@@ -136,6 +136,27 @@ sudo systemctl enable --now usb-displayd.service
 启动前请在 `/etc/modprobe.d/usbdisplay.conf` 设置虚拟分辨率，并在
 `/etc/default/usb-displayd` 选择后端。
 
+需要离线交付时，可以生成与目标机当前内核严格绑定的 Debian 包：
+
+```bash
+make userspace
+make module KDIR=/lib/modules/$(uname -r)/build
+sh scripts/package-deb.sh 0.2.0 dist
+sudo sh dist/install-usbdisplay-offline.sh dist/usbdisplay-stack_*.deb
+```
+
+安装脚本校验同目录 SHA-256、包架构和准确的 `uname -r`，不会联网补依赖，
+也不会在没有 `--enable` 时加载模块或启动服务。实体后端配置和交付边界详见
+[离线 Debian 包](docs/offline-deb.zh-CN.md)。
+
+`usbdisplay-check` 可供安装脚本和监控程序调用。默认只有虚拟设备、活动守护
+进程标记、实体后端和预期的 `185b:2d1d` USB 适配器全部存在时才返回 `0`：
+
+```bash
+usbdisplay-check
+usbdisplay-check --json
+```
+
 ## Actions Micro 激活
 
 实时后端需要用户有权使用的 `DPRPL001` replay 模板，其中包含适配器的

@@ -153,6 +153,31 @@ sudo systemctl enable --now usb-displayd.service
 Set the virtual resolution in `/etc/modprobe.d/usbdisplay.conf` and select a
 backend in `/etc/default/usb-displayd` before enabling the service.
 
+For an offline Debian artifact tied to the exact running kernel, build and
+install with:
+
+```bash
+make userspace
+make module KDIR=/lib/modules/$(uname -r)/build
+sh scripts/package-deb.sh 0.2.0 dist
+sudo sh dist/install-usbdisplay-offline.sh dist/usbdisplay-stack_*.deb
+```
+
+The installer verifies the adjacent SHA-256 file, package architecture, and
+exact `uname -r`. It never downloads dependencies and does not activate the
+module unless `--enable` is given. See the
+[offline Debian package guide](docs/offline-deb.zh-CN.md) for physical backend
+configuration and artifact boundaries.
+
+`usbdisplay-check` is suitable for installers and supervisors. Its default
+exit status is zero only when the virtual devices, live daemon marker, physical
+backend, and expected `185b:2d1d` USB adapter are all present:
+
+```bash
+usbdisplay-check
+usbdisplay-check --json
+```
+
 ## Actions Micro activation
 
 The live backend requires an authorized `DPRPL001` replay template containing

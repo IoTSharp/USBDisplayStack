@@ -28,6 +28,8 @@ install -m 0755 "$package_dir/bin/fb-test-pattern" \
 	/usr/bin/usbdisplay-fb-test-pattern
 install -m 0755 "$package_dir/bin/drm-probe" \
 	/usr/bin/usbdisplay-drm-probe
+install -m 0755 "$package_dir/bin/usbdisplay-check" \
+	/usr/bin/usbdisplay-check
 install -m 0755 "$package_dir/lib/usbdisplay-null.so" \
 	/usr/lib/usbdisplay/usbdisplay-null.so
 install -m 0755 "$package_dir/lib/usbdisplay-ppm.so" \

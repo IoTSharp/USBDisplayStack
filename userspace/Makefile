@@ -5,6 +5,7 @@ BUILD_DIR ?= $(abspath ../build)
 CPPFLAGS += -I../include
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC
+LDLIBS += -ldl -lrt
 
 DAEMON := $(BUILD_DIR)/usb-displayd
 NULL_BACKEND := $(BUILD_DIR)/usbdisplay-null.so
@@ -19,7 +20,7 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 $(DAEMON): usb-displayd.c | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@ -ldl
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@ $(LDLIBS)
 
 $(NULL_BACKEND): ../backends/null/null_backend.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -shared $< -o $@

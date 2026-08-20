@@ -1,0 +1,311 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+set -u
+
+program=${0##*/}
+sysfs_root=${USBDISPLAY_SYSFS_ROOT:-/sys}
+proc_root=${USBDISPLAY_PROC_ROOT:-/proc}
+dev_root=${USBDISPLAY_DEV_ROOT:-/dev}
+ready_file=${USBDISPLAY_READY_FILE:-/run/usbdisplay/ready}
+device_path=
+expected_vid=185b
+expected_pid=2d1d
+allow_diagnostic=false
+json_output=false
+quiet=false
+wait_seconds=0
+
+usage()
+{
+	cat <<EOF
+Usage: $program [OPTIONS]
+
+Check whether USBDisplayStack is connected to a usable physical display.
+
+  --allow-diagnostic   accept a ready null or PPM backend
+  --device PATH        check this stream device instead of auto-discovery
+  --ready-file PATH    override $ready_file
+  --vid HEX            expected USB vendor ID (default: 185b)
+  --pid HEX            expected USB product ID (default: 2d1d)
+  --wait SECONDS       wait up to this many seconds for readiness
+  --json               emit one JSON object
+  --quiet              suppress output; use only the exit status
+  -h, --help           show this help
+
+Exit status: 0 ready, 1 not ready, 2 invalid command line.
+EOF
+}
+
+is_unsigned_integer()
+{
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+is_wait_integer()
+{
+	case "$1" in
+		''|*[!0-9]*|??????*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+normalize_usb_id()
+{
+	normalized_id=$(printf '%s' "$1" | tr 'ABCDEF' 'abcdef')
+	case "$normalized_id" in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+			printf '%s\n' "$normalized_id"
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+json_escape()
+{
+	printf '%s' "$1" | sed \
+		-e 's/\\/\\\\/g' \
+		-e 's/"/\\"/g' \
+		-e 's/	/\\t/g'
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--allow-diagnostic)
+			allow_diagnostic=true
+			shift
+			;;
+		--device)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			device_path=$2
+			shift 2
+			;;
+		--ready-file)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			ready_file=$2
+			shift 2
+			;;
+		--vid)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			if ! expected_vid=$(normalize_usb_id "$2"); then
+				printf '%s: invalid VID: %s\n' "$program" "$2" >&2
+				exit 2
+			fi
+			shift 2
+			;;
+		--pid)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			if ! expected_pid=$(normalize_usb_id "$2"); then
+				printf '%s: invalid PID: %s\n' "$program" "$2" >&2
+				exit 2
+			fi
+			shift 2
+			;;
+		--wait)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			if ! is_wait_integer "$2"; then
+				printf '%s: wait time must be 0..99999 seconds\n' \
+					"$program" >&2
+				exit 2
+			fi
+			wait_seconds=$2
+			shift 2
+			;;
+		--json)
+			json_output=true
+			shift
+			;;
+		--quiet)
+			quiet=true
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			printf '%s: unknown option: %s\n' "$program" "$1" >&2
+			usage >&2
+			exit 2
+			;;
+	esac
+done
+
+collect_status()
+{
+	module_loaded=false
+	stream_device=
+	framebuffer_device=
+	usb_device=
+	marker_exists=false
+	marker_valid=false
+	daemon_alive=false
+	backend=
+	daemon_pid=
+	physical_value=
+	service_state=unavailable
+	ready=false
+	reason=
+
+	if [ -d "$sysfs_root/module/usbdisplay" ]; then
+		module_loaded=true
+	fi
+
+	if [ -n "$device_path" ]; then
+		if [ -c "$device_path" ] && [ -r "$device_path" ]; then
+			stream_device=$device_path
+		fi
+	else
+		for candidate in "$dev_root"/usbdisplay[0-9]*; do
+			if [ -c "$candidate" ] && [ -r "$candidate" ]; then
+				stream_device=$candidate
+				break
+			fi
+		done
+	fi
+
+	for candidate in "$sysfs_root"/class/graphics/fb[0-9]*; do
+		if [ -r "$candidate/name" ] &&
+		   [ "$(tr -d '\r\n' < "$candidate/name")" = usbdisplay ] &&
+		   [ -c "$dev_root/${candidate##*/}" ] &&
+		   [ -w "$dev_root/${candidate##*/}" ]; then
+			framebuffer_device=$dev_root/${candidate##*/}
+			break
+		fi
+	done
+
+	for candidate in "$sysfs_root"/bus/usb/devices/*; do
+		if [ -r "$candidate/idVendor" ] && [ -r "$candidate/idProduct" ]; then
+			candidate_vid=$(tr -d '\r\n' < "$candidate/idVendor" |
+				tr 'ABCDEF' 'abcdef')
+			candidate_pid=$(tr -d '\r\n' < "$candidate/idProduct" |
+				tr 'ABCDEF' 'abcdef')
+			if [ "$candidate_vid" = "$expected_vid" ] &&
+			   [ "$candidate_pid" = "$expected_pid" ]; then
+				usb_device=${candidate##*/}
+				break
+			fi
+		fi
+	done
+
+	if [ -r "$ready_file" ]; then
+		marker_exists=true
+		while IFS='=' read -r marker_key marker_value; do
+			case "$marker_key" in
+				pid) daemon_pid=$marker_value ;;
+				backend) backend=$marker_value ;;
+				physical) physical_value=$marker_value ;;
+			esac
+		done < "$ready_file"
+
+		case "$backend" in
+			''|*[!0-9A-Za-z._+-]*) backend_valid=false ;;
+			*) backend_valid=true ;;
+		esac
+		if is_unsigned_integer "$daemon_pid" && [ "$daemon_pid" -gt 0 ] &&
+		   $backend_valid &&
+		   { [ "$physical_value" = 0 ] || [ "$physical_value" = 1 ]; }; then
+			marker_valid=true
+		fi
+	fi
+
+	if $marker_valid && [ -r "$proc_root/$daemon_pid/comm" ] &&
+	   [ "$(tr -d '\r\n' < "$proc_root/$daemon_pid/comm")" = usb-displayd ]; then
+		daemon_alive=true
+	fi
+
+	if command -v systemctl >/dev/null 2>&1; then
+		if systemctl is-active --quiet usb-displayd.service >/dev/null 2>&1; then
+			service_state=active
+		else
+			service_state=inactive
+		fi
+	fi
+
+	if ! $module_loaded; then
+		reason='kernel module is not loaded'
+	elif [ -z "$stream_device" ]; then
+		reason='stream device is missing'
+	elif [ -z "$framebuffer_device" ]; then
+		reason='usbdisplay framebuffer is missing'
+	elif ! $marker_exists; then
+		reason='readiness marker is missing'
+	elif ! $marker_valid; then
+		reason='readiness marker is invalid'
+	elif ! $daemon_alive; then
+		reason='readiness marker does not name a live usb-displayd process'
+	elif ! $allow_diagnostic && [ "$physical_value" != 1 ]; then
+		reason='backend is diagnostic-only'
+	elif ! $allow_diagnostic && [ -z "$usb_device" ]; then
+		reason="USB adapter $expected_vid:$expected_pid is missing"
+	else
+		ready=true
+		reason='ready'
+	fi
+}
+
+remaining_wait=$wait_seconds
+while :; do
+	collect_status
+	$ready && break
+	[ "$remaining_wait" -le 0 ] && break
+	sleep 1
+	remaining_wait=$((remaining_wait - 1))
+done
+
+if ! $quiet; then
+	if $ready; then
+		if [ "$physical_value" = 1 ]; then
+			status=physical-ready
+		else
+			status=diagnostic-ready
+		fi
+	else
+		status=not-ready
+	fi
+
+	if $json_output; then
+		printf '{'
+		printf '"status":"%s"' "$status"
+		printf ',"ready":%s' "$ready"
+		printf ',"reason":"%s"' "$(json_escape "$reason")"
+		printf ',"module_loaded":%s' "$module_loaded"
+		printf ',"stream_device":"%s"' "$(json_escape "$stream_device")"
+		printf ',"framebuffer_device":"%s"' \
+			"$(json_escape "$framebuffer_device")"
+		printf ',"marker_file":"%s"' "$(json_escape "$ready_file")"
+		printf ',"marker_valid":%s' "$marker_valid"
+		printf ',"daemon_pid":"%s"' "$(json_escape "$daemon_pid")"
+		printf ',"daemon_alive":%s' "$daemon_alive"
+		printf ',"backend":"%s"' "$(json_escape "$backend")"
+		if [ "$physical_value" = 1 ]; then
+			printf ',"physical":true'
+		else
+			printf ',"physical":false'
+		fi
+		printf ',"usb_id":"%s:%s"' "$expected_vid" "$expected_pid"
+		printf ',"usb_device":"%s"' "$(json_escape "$usb_device")"
+		printf ',"service":"%s"' "$service_state"
+		printf '}\n'
+	else
+		printf 'USBDisplayStack: %s\n' "$status"
+		printf '  module:     %s\n' "$module_loaded"
+		printf '  stream:     %s\n' "${stream_device:-missing}"
+		printf '  framebuffer:%s\n' " ${framebuffer_device:-missing}"
+		printf '  daemon:     pid=%s alive=%s service=%s\n' \
+			"${daemon_pid:-missing}" "$daemon_alive" "$service_state"
+		printf '  backend:    %s physical=%s\n' \
+			"${backend:-missing}" "${physical_value:-unknown}"
+		printf '  adapter:    %s:%s %s\n' "$expected_vid" "$expected_pid" \
+			"${usb_device:-missing}"
+		printf '  result:     %s\n' "$reason"
+	fi
+fi
+
+$ready

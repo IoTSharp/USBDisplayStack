@@ -55,6 +55,8 @@ mkdir -p "$package_dir/bin" "$package_dir/experimental" \
 install -m 0755 "$build_dir/usb-displayd" "$package_dir/bin/"
 install -m 0755 "$build_dir/fb-test-pattern" "$package_dir/bin/"
 install -m 0755 "$build_dir/drm-probe" "$package_dir/bin/"
+install -m 0755 "$project_dir/tools/usbdisplay-check" \
+	"$package_dir/bin/"
 install -m 0755 "$build_dir/actions-micro-replay" \
 	"$package_dir/experimental/"
 install -m 0755 "$build_dir/usbdisplay-null.so" "$package_dir/lib/"

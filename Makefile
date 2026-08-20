@@ -2,7 +2,7 @@
 
 BUILD_DIR ?= $(CURDIR)/build
 
-.PHONY: all userspace module examples-lvgl clean
+.PHONY: all userspace module examples-lvgl check clean
 
 all: userspace
 
@@ -15,6 +15,10 @@ module:
 
 examples-lvgl:
 	$(MAKE) -C examples/lvgl BUILD_DIR=$(BUILD_DIR)/examples
+
+check:
+	sh tests/test-usbdisplay-check.sh
+	sh tests/test-package-deb.sh
 
 clean:
 	$(MAKE) -C userspace BUILD_DIR=$(BUILD_DIR) clean
