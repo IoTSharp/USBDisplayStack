@@ -129,3 +129,23 @@ restart the complete activation sequence.
 - handle status input, backpressure, and frame dropping;
 - repeat physical power-cycle and reconnect tests;
 - validate long-running behavior.
+
+## 2026-08-20 physical-link follow-up
+
+The next investigation must start at the USB physical path: connect the adapter
+directly to a motherboard USB port, use a short known-good cable, and remove any
+passive hub or extension from the path. Capture the daemon log while the adapter
+is idle and while frames are moving. The source-specific records are:
+
+- `heartbeat send success|failed`: command endpoint, sequence, template index,
+  and the failure `errno` when present;
+- `hid write failed`: HID endpoint, descriptor, byte offset, total report length,
+  and `errno`;
+- `ffmpeg pipe ... failed`: pipe operation, descriptor, and `errno`;
+- `usb-displayd: transport lost|transport open generation|reopen_count`: the
+  observed loss and the number of completed backend reopens.
+
+A replay, simulated error, or a clean uninterrupted run is not a physical-link
+recovery test. Do not call the issue fully resolved until one real unplug/replug
+or equivalent USB link-loss test shows the existing daemon returning to a ready
+state, sending heartbeats, and delivering new HDMI frames after recovery.

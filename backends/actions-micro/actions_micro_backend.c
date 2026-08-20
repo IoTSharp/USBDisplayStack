@@ -548,45 +548,77 @@ static int open_hidraw(const char *configured_path, int expected_input,
 	return result == 0 ? descriptor : result;
 }
 
-static int write_all(int descriptor, const void *buffer, size_t length)
+/* Keep HID and FFmpeg pipe failures distinguishable in field logs. */
+static int write_all_logged(int descriptor, const void *buffer, size_t length,
+			    const char *source)
 {
 	const unsigned char *bytes = buffer;
 	size_t total = 0;
 	ssize_t written;
+	int error_number = 0;
+	int result = 0;
 
-	while (total < length) {
+	while (total < length && result == 0) {
 		written = write(descriptor, bytes + total, length - total);
 		if (written < 0 && errno == EINTR) {
 			continue;
 		}
 		if (written < 0) {
-			return -errno;
+			error_number = errno;
+			result = -error_number;
+		} else if (written == 0) {
+			error_number = EIO;
+			result = -error_number;
+		} else {
+			total += (size_t)written;
 		}
-		if (written == 0) {
-			return -EIO;
-		}
-		total += (size_t)written;
 	}
 
-	return 0;
+	if (result != 0) {
+		fprintf(stderr,
+			"actions-micro: %s write failed fd=%d offset=%zu/%zu "
+			"errno=%d (%s)\n",
+			source != NULL ? source : "transport", descriptor, total,
+			length, error_number, strerror(error_number));
+	}
+
+	return result;
+}
+
+/* Poll/read failures belong to the encoder pipe, even when the child remains alive. */
+static void log_ffmpeg_pipe_error(const char *operation, int descriptor,
+				  int error_number)
+{
+	if (error_number <= 0) {
+		error_number = EIO;
+	}
+	fprintf(stderr,
+		"actions-micro: ffmpeg pipe %s failed fd=%d errno=%d (%s)\n",
+		operation != NULL ? operation : "operation", descriptor,
+		error_number, strerror(error_number));
 }
 
 static int send_report(struct actions_context *state, uint8_t endpoint,
 		       const unsigned char data[HID_REPORT_LENGTH])
 {
-	int descriptor;
-	int result;
+	int descriptor = -1;
+	int result = -EPROTO;
 
 	if (endpoint == 0x03) {
 		descriptor = state->hid[0];
 	} else if (endpoint == 0x04) {
 		descriptor = state->hid[1];
-	} else {
-		return -EPROTO;
 	}
-	result = write_all(descriptor, data, HID_REPORT_LENGTH);
-	if (result == 0) {
-		++state->reports;
+	if (descriptor >= 0) {
+		result = write_all_logged(descriptor, data, HID_REPORT_LENGTH, "hid");
+		if (result == 0) {
+			++state->reports;
+		} else {
+			fprintf(stderr,
+				"actions-micro: hid write failed endpoint=0x%02x fd=%d "
+				"errno=%d (%s)\n",
+				endpoint, descriptor, -result, strerror(-result));
+		}
 	}
 
 	return result;
@@ -691,20 +723,33 @@ static int send_due_heartbeats(struct actions_context *state, uint64_t now_ns)
 	unsigned char report[HID_REPORT_LENGTH];
 	uint64_t delay_us;
 	uint8_t endpoint;
+	uint32_t sequence;
 	unsigned int sent = 0;
 	int result = 0;
 
+	/* Heartbeat outcomes are explicit transport evidence, not inferred health. */
 	while (result == 0 && now_ns >= state->next_heartbeat_ns &&
 	       sent < MAX_HEARTBEATS_PER_TICK) {
 		current = &state->heartbeats[state->heartbeat_index];
 		memcpy(report, current->data, sizeof(report));
 		endpoint = state->next_command_endpoint;
+		sequence = state->command_sequence++;
 		report[0] = endpoint == 0x04 ? 1 : 2;
-		write_le32(report + 4, state->command_sequence++);
+		write_le32(report + 4, sequence);
 		result = send_report(state, endpoint, report);
 		if (result == 0) {
 			state->next_command_endpoint =
 				endpoint == 0x04 ? 0x03 : 0x04;
+			fprintf(stderr,
+				"actions-micro: heartbeat send success endpoint=0x%02x "
+				"sequence=%u index=%zu\n",
+				endpoint, sequence, state->heartbeat_index);
+		} else {
+			fprintf(stderr,
+				"actions-micro: heartbeat send failed endpoint=0x%02x "
+				"sequence=%u index=%zu errno=%d (%s)\n",
+				endpoint, sequence, state->heartbeat_index, -result,
+				strerror(-result));
 		}
 		if (state->heartbeat_index + 1 < state->heartbeat_count) {
 			delay_us = state->heartbeats[state->heartbeat_index + 1].timestamp_us -
@@ -792,13 +837,20 @@ static int start_encoder(struct actions_context *state, uint32_t format)
 	} else if (format == USBDISPLAY_FORMAT_RGB565) {
 		pixel_format = "rgb565le";
 	} else {
-		return -ENOTSUP;
+		pixel_format = NULL;
+		result = -ENOTSUP;
 	}
-	snprintf(dimensions, sizeof(dimensions), "%ux%u", state->width,
-		 state->height);
-	snprintf(frame_rate, sizeof(frame_rate), "%u", state->options.fps);
-	if (pipe(input_pipe) != 0 || pipe(output_pipe) != 0) {
-		result = -errno;
+	if (result == 0) {
+		snprintf(dimensions, sizeof(dimensions), "%ux%u", state->width,
+			 state->height);
+		snprintf(frame_rate, sizeof(frame_rate), "%u", state->options.fps);
+		if (pipe(input_pipe) != 0) {
+			result = -errno;
+			log_ffmpeg_pipe_error("create input", -1, -result);
+		} else if (pipe(output_pipe) != 0) {
+			result = -errno;
+			log_ffmpeg_pipe_error("create output", -1, -result);
+		}
 	}
 	if (result == 0) {
 		result = set_close_on_exec(input_pipe[1]);
@@ -953,13 +1005,17 @@ static int read_encoded_access_unit(struct actions_context *state,
 		}
 		if (poll_result < 0) {
 			result = -errno;
+			log_ffmpeg_pipe_error("poll", descriptor.fd, -result);
 		} else if (poll_result == 0) {
 			if (*encoded_bytes == 0) {
 				result = -ETIMEDOUT;
+				log_ffmpeg_pipe_error("read timeout", descriptor.fd,
+						      ETIMEDOUT);
 			}
 			break;
 		} else if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
 			result = -EPIPE;
+			log_ffmpeg_pipe_error("poll event", descriptor.fd, EPIPE);
 		} else {
 			result = reserve_buffer(&state->encoder.encoded,
 						&state->encoder.encoded_capacity,
@@ -975,8 +1031,10 @@ static int read_encoded_access_unit(struct actions_context *state,
 					timeout = 20;
 				} else if (count == 0) {
 					result = -EPIPE;
+					log_ffmpeg_pipe_error("read eof", descriptor.fd, EPIPE);
 				} else if (errno != EAGAIN && errno != EINTR) {
 					result = -errno;
+					log_ffmpeg_pipe_error("read", descriptor.fd, -result);
 				}
 			}
 		}
@@ -1161,12 +1219,14 @@ static int actions_submit(void *context,
 	size_t packed_bytes = 0;
 	size_t encoded_bytes = 0;
 	bool idr = false;
-	int result;
+	int result = 0;
 
 	if (frame->width != state->width || frame->height != state->height) {
-		return -EINVAL;
+		result = -EINVAL;
 	}
-	result = send_due_heartbeats(state, monotonic_nanoseconds());
+	if (result == 0) {
+		result = send_due_heartbeats(state, monotonic_nanoseconds());
+	}
 	if (result == 0 && state->encoder.format != frame->format) {
 		result = start_encoder(state, frame->format);
 	}
@@ -1174,8 +1234,9 @@ static int actions_submit(void *context,
 		result = pack_frame(state, frame, &packed_bytes);
 	}
 	if (result == 0) {
-		result = write_all(state->encoder.input_fd,
-				   state->encoder.packed_frame, packed_bytes);
+		result = write_all_logged(state->encoder.input_fd,
+					   state->encoder.packed_frame, packed_bytes,
+					   "ffmpeg input pipe");
 	}
 	if (result == 0) {
 		result = read_encoded_access_unit(state, &encoded_bytes);

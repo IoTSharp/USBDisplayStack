@@ -305,6 +305,9 @@ int main(int argc, char **argv)
 	int open_result;
 	int loop_result;
 	unsigned int retry_count = 0U;
+	unsigned long long reopen_count = 0ULL;
+	/* Count only completed opens after run_loop reported a transport loss. */
+	bool reopen_pending = false;
 
 	result = parse_arguments(argc, argv, &device_path, &backend_path,
 				 &backend_option, &ready_file, &retry_ms);
@@ -385,8 +388,9 @@ int main(int argc, char **argv)
 			if (open_result != 0) {
 				if (retry_count == 0U || retry_count % 5U == 0U) {
 					fprintf(stderr,
-						"usb-displayd: backend unavailable: %s\n",
-						strerror(-open_result));
+						"usb-displayd: backend unavailable: %s "
+						"reopen_count=%llu\n",
+						strerror(-open_result), reopen_count);
 				}
 				retry_count += 1U;
 				result = sleep_milliseconds(retry_ms);
@@ -402,18 +406,31 @@ int main(int argc, char **argv)
 					backend->close(backend_context);
 					backend_context = NULL;
 				} else {
+					if (reopen_pending) {
+						++reopen_count;
+						reopen_pending = false;
+					}
 					fprintf(stderr,
 						"usb-displayd: %s -> %s (%ux%u) ready\n",
 						device_path, backend->name, info.width, info.height);
+					fprintf(stderr,
+						"usb-displayd: transport open generation=%llu "
+						"reopen_count=%llu\n",
+						reopen_count + 1ULL, reopen_count);
 					loop_result = run_loop(device_fd, &info, mapping, backend,
 						backend_context);
 					remove_ready_file(ready_file);
 					backend->close(backend_context);
 					backend_context = NULL;
 					if (loop_result != 0 && !stop_requested) {
+						reopen_pending = true;
 						fprintf(stderr,
 							"usb-displayd: transport lost: %s\n",
 							strerror(-loop_result));
+						fprintf(stderr,
+							"usb-displayd: waiting to reopen "
+							"reopen_count=%llu retry_count=%u\n",
+							reopen_count, retry_count);
 						result = sleep_milliseconds(retry_ms);
 					} else {
 						result = 0;
