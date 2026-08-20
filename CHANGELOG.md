@@ -8,6 +8,8 @@
   reports for installation checks and second-screen supervision.
 - Link the daemon with `librt` for older glibc toolchains and reject packaging
   when the kernel module vermagic differs from the declared target kernel.
+- Migrate an unowned legacy `/usr/lib` systemd unit during offline activation
+  so it cannot shadow the Debian package unit under `/lib`.
 - Keep the transport daemon alive while the selected USB backend is absent or
   disconnected; publish a PID-checked readiness marker for framebuffer clients.
 - Mark readiness with the backend's physical-transport capability so diagnostic

@@ -66,6 +66,12 @@ sudo sh ./install-usbdisplay-offline.sh \
 `185b:2d1d` 的两个 HID 接口，脚本以非零状态结束，但已经安装的软件不会被
 自动回滚。此时应保留现场，运行检测命令并查看服务日志。
 
+从源码安装脚本升级时，旧版本可能在 `/usr/lib/systemd/system` 留下未受包
+管理的同名服务并遮蔽 Debian 包的 `/lib/systemd/system` 单元。离线安装脚本
+只会迁移未被其他包拥有的旧单元，并把原文件备份到
+`/var/backups/usbdisplay-stack/legacy-usb-displayd.service`；若旧单元属于其他
+软件包则拒绝继续，避免覆盖其他包的所有权。
+
 Null 和 PPM 后端只用于诊断，不代表 HDMI 已经连通：
 
 ```bash

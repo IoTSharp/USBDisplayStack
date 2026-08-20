@@ -272,8 +272,23 @@ fi
 if $enable_service; then
 	command -v modprobe >/dev/null 2>&1 || fail 'modprobe is not installed'
 	command -v systemctl >/dev/null 2>&1 || fail 'systemctl is not installed'
+	package_unit=/lib/systemd/system/usb-displayd.service
+	legacy_unit=/usr/lib/systemd/system/usb-displayd.service
+	if [ -e "$legacy_unit" ] &&
+	   [ "$(readlink -f "$legacy_unit")" != "$(readlink -f "$package_unit")" ]; then
+		if dpkg-query -S "$legacy_unit" >/dev/null 2>&1; then
+			fail "a package-owned legacy unit shadows $package_unit: $legacy_unit"
+		fi
+		legacy_backup=/var/backups/usbdisplay-stack/legacy-usb-displayd.service
+		install -d -m 0700 "$(dirname -- "$legacy_backup")"
+		if [ ! -e "$legacy_backup" ]; then
+			cp -a "$legacy_unit" "$legacy_backup"
+		fi
+		rm -f "$legacy_unit"
+		systemctl daemon-reload || fail 'failed to reload migrated systemd units'
+	fi
 	modprobe usbdisplay || fail 'failed to load usbdisplay kernel module'
-	systemctl enable usb-displayd.service >/dev/null ||
+	systemctl enable --force usb-displayd.service >/dev/null ||
 		fail 'failed to enable usb-displayd.service'
 	systemctl restart usb-displayd.service ||
 		fail 'failed to start usb-displayd.service'
