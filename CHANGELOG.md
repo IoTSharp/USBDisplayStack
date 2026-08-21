@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Continue command and video sequence high-water marks across an Actions Micro
+  backend reopen after a successful usbfs reset, while retaining captured
+  sequence values after a failed reset or real device disappearance.
 - Recover a failed persistent FFmpeg process inside the Actions Micro backend
   with one bounded same-frame retry, while preserving the live HID transport
   session and its command/video sequence numbers.

@@ -134,8 +134,22 @@ struct actions_context {
 	int hid[2];
 	bool transport_failed;
 	bool usb_reset_attempted;
+	/* 未断电的固件会话必须续接命令与视频序号，避免重放旧序号被拒收。 */
+	bool preserve_transport_sequences;
+	uint32_t command_sequence_offset;
+	uint32_t video_sequence_offset;
 	bool encoder_handoff_pending;
 };
+
+/* 仅在同一守护进程内跨后端重开保存已确认未断电设备的序号高水位。 */
+struct transport_sequence_resume {
+	uint32_t command_sequence;
+	uint32_t video_sequence;
+	char usb_device_path[USB_DEVICE_NODE_LENGTH];
+	bool valid;
+};
+
+static struct transport_sequence_resume transport_sequence_resume;
 
 struct byte_buffer {
 	unsigned char *data;
@@ -175,6 +189,70 @@ static void write_le32(unsigned char *data, uint32_t value)
 	data[1] = (unsigned char)(value >> 8);
 	data[2] = (unsigned char)(value >> 16);
 	data[3] = (unsigned char)(value >> 24);
+}
+
+static int find_actions_micro_usb_node(
+	char device_path[USB_DEVICE_NODE_LENGTH]);
+
+/* 未断电重开时只平移模板序号，保留报告顺序、分片和端点交替。 */
+static void prepare_transport_sequence_resume(struct actions_context *state)
+{
+	char current_device_path[USB_DEVICE_NODE_LENGTH];
+	bool command_found = false;
+	bool video_found = false;
+	size_t index;
+	uint32_t sequence;
+	int device_result = -ENODEV;
+
+	if (transport_sequence_resume.valid) {
+		device_result = find_actions_micro_usb_node(current_device_path);
+		if (device_result != 0 ||
+		    strcmp(current_device_path,
+			   transport_sequence_resume.usb_device_path) != 0) {
+			/* device number 改变代表真实重新枚举，必须回到模板原始序号。 */
+			fprintf(stderr,
+				"actions-micro: bootstrap sequence resume discarded "
+				"after USB re-enumeration\n");
+			transport_sequence_resume.valid = false;
+		}
+	}
+	if (transport_sequence_resume.valid &&
+	    state->options.full_bootstrap) {
+		for (index = 0; index < state->bootstrap_count; ++index) {
+			sequence = read_le32(state->bootstrap[index].data + 4);
+			if (state->bootstrap[index].data[1] == 1) {
+				if (!command_found) {
+					state->command_sequence_offset =
+						transport_sequence_resume.command_sequence -
+						sequence;
+					command_found = true;
+				}
+				write_le32(state->bootstrap[index].data + 4,
+					   sequence + state->command_sequence_offset);
+			} else if (state->bootstrap[index].data[1] == 2) {
+				if (!video_found) {
+					state->video_sequence_offset =
+						transport_sequence_resume.video_sequence -
+						sequence;
+					video_found = true;
+				}
+				write_le32(state->bootstrap[index].data + 4,
+					   sequence + state->video_sequence_offset);
+			}
+		}
+		if (command_found && video_found) {
+			state->command_sequence =
+				transport_sequence_resume.command_sequence;
+			state->video_sequence =
+				transport_sequence_resume.video_sequence;
+			state->preserve_transport_sequences = true;
+			transport_sequence_resume.valid = false;
+			fprintf(stderr,
+				"actions-micro: bootstrap sequence resume command=%u "
+				"video=%u\n",
+				state->command_sequence, state->video_sequence);
+		}
+	}
 }
 
 static uint64_t monotonic_nanoseconds(void)
@@ -340,6 +418,10 @@ static int reset_actions_micro_usb_device(void)
 		result = -errno;
 	}
 	if (result == 0) {
+		/* 路径中的 device number 用于排除复位后又发生的真实拔插。 */
+		(void)snprintf(transport_sequence_resume.usb_device_path,
+			       sizeof(transport_sequence_resume.usb_device_path),
+			       "%s", device_path);
 		fprintf(stderr, "actions-micro: USB reset completed path=%s\n",
 			device_path);
 	} else {
@@ -381,6 +463,8 @@ static int recover_failed_transport(struct actions_context *state,
 	if (state != NULL && state->transport_failed &&
 	    !state->usb_reset_attempted) {
 		state->usb_reset_attempted = true;
+		/* 只有 usbfs 明确复位成功，才把该设备视为同一未断电固件会话。 */
+		state->preserve_transport_sequences = false;
 		close_hidraw_descriptors(state);
 		now_ns = monotonic_nanoseconds();
 		if (last_reset_ns != 0 && now_ns >= last_reset_ns &&
@@ -392,6 +476,9 @@ static int recover_failed_transport(struct actions_context *state,
 		} else {
 			last_reset_ns = now_ns;
 			reset_result = reset_actions_micro_usb_device();
+			if (reset_result == 0) {
+				state->preserve_transport_sequences = true;
+			}
 			if (result == 0) {
 				result = reset_result;
 			}
@@ -1820,6 +1907,21 @@ static void actions_close(void *context)
 		stop_encoder(&state->encoder);
 		/* close 统一释放可能已被看门狗置为 -1 的两个 HID 描述符。 */
 		close_hidraw_descriptors(state);
+		if (state->preserve_transport_sequences) {
+			/* 同一未断电固件的下一次 bootstrap 从已发送序号之后继续。 */
+			transport_sequence_resume.command_sequence =
+				state->command_sequence;
+			transport_sequence_resume.video_sequence =
+				state->video_sequence;
+			transport_sequence_resume.valid = true;
+			fprintf(stderr,
+				"actions-micro: saved transport sequence command=%u "
+				"video=%u\n",
+				state->command_sequence, state->video_sequence);
+		} else if (state->transport_failed) {
+			/* 设备消失或复位失败时保留模板原序号，兼容真实重新枚举。 */
+			transport_sequence_resume.valid = false;
+		}
 		if (state->frames != 0 || state->reports != 0 ||
 		    state->input_reports != 0) {
 			/* 关闭摘要同时区分输入端点与本地编码恢复，不再混同 USB 重开。 */
@@ -1897,6 +1999,8 @@ static int actions_open(const struct usbdisplay_backend_config *config,
 			hid0_path, hid1_path, state->initialization_count,
 			state->heartbeat_count, state->bootstrap_count);
 		if (state->options.full_bootstrap) {
+			/* usbfs 复位不切断 VBUS，重开时必须避免模板传输序号回退。 */
+			prepare_transport_sequence_resume(state);
 			result = send_full_bootstrap(state);
 		} else {
 			result = send_initialization(state);

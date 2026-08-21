@@ -175,6 +175,57 @@ disconnect or reset. The daemon previously promoted every encoder EOF into a
 full backend reopen; the backend now records the FFmpeg exit code or signal and
 performs one local encoder restart before allowing that escalation.
 
+At 18:37 on 2026-08-21, a controlled sysfs `deauthorize -> authorize` cycle
+rebound the HID interfaces and restarted the transport, but USB device number
+17 did not change. The daemon completed `bootstrap=full`, published a new ready
+marker, and continued receiving input reports, while the operator confirmed
+that the physical display still showed its connecting page. This is a failed
+physical recovery attempt, not a re-enumeration or firmware recovery.
+
+A device-only runtime-power experiment at 18:46 also failed to suspend the
+adapter. With the daemon stopped, the unmounted virtual optical drive and USB
+device were temporarily changed to `power/control=auto` with zero autosuspend
+delay. Port `1-6` remained `active` for all 20 polls,
+`runtime_suspended_time` stayed zero, and device number 17 did not change. The
+original power controls and daemon were restored. No suspend/resume recovery
+claim can be made from this result.
+
+A bounded raw sample taken while the display remained on that page contained
+eight 511-byte input0 reports. Their outer headers used report ID 2, message
+type 1, one fragment, and a 24-byte payload. The sequence at bytes 4 through 7
+increased for every report. The payload began with a repeated length word and
+the little-endian tag value `0x50494e47` (`PING`), for example:
+
+```text
+02 01 00 00 3e 02 00 00 01 00 00 00 18 00 18 00
+00 00 47 4e 49 50 69 98 29 00 03 00 00 00 00 00
+```
+
+This identifies the sampled input as a control/keepalive response. In
+particular, the values previously seen at bytes 12 and 14 are lengths rather
+than a video-ready state. Advancing input-report counts therefore prove that
+the firmware control path is alive, but do not acknowledge H.264 acceptance or
+physical presentation. A reproducible bounded sample can be collected by
+opening the verified input0 hidraw node read-only and reading complete reports:
+
+```bash
+timeout 8 dd if=/dev/hidraw0 of=/tmp/actions-input.bin \
+  bs=511 count=8 status=none
+od -An -v -tx1 -N32 /tmp/actions-input.bin
+```
+
+The captured full bootstrap ends with command sequence 16 and video sequence
+92. Replaying those fixed values after a successful usbfs reset makes both
+streams regress even though that reset does not remove firmware power. The
+backend now retains the next command and video sequence high-water marks only
+when `USBDEVFS_RESET` succeeds in the same daemon process, and shifts the next
+full bootstrap to continue from them only while the usbfs path, including USB
+device number, remains unchanged. A failed reset/device disappearance does not
+retain the marks, and a changed device number discards them, so a real
+re-enumeration continues to use the captured template sequence. This addresses
+a concrete non-power-reset session mismatch; physical display recovery still
+requires field validation.
+
 Metadata-only inspection of the authorized replay found an initial
 configuration message with NAL types `7,8,6`, followed by an IDR message with
 NAL type `5`; the captured firmware-compatible transport did not contain AUD.
