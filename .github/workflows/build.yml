@@ -9,6 +9,10 @@ on:
         description: 'DEB version; leave blank for an automatic CI or tag version'
         required: false
         type: string
+      release_tag:
+        description: 'Existing vX.Y.Z tag to rebuild and publish; leave blank for artifact only'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
       - name: Build userspace and tools
         run: make userspace
       - name: Test readiness checker
@@ -31,6 +37,8 @@ jobs:
       KERNEL_RELEASE: 4.15.0-60-generic
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Build target-kernel module without a bind mount
         shell: bash
@@ -68,13 +76,17 @@ jobs:
     needs: kernel-4-15
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_revision: ${{ steps.version.outputs.source_revision }}
     env:
       KERNEL_RELEASE: 4.15.0-60-generic
       KERNEL_ARCHITECTURE: i386
       PCCT_IMAGE: ghcr.io/iotsharp/pcct-build-x86:latest
       REQUESTED_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Download target-kernel module
         uses: actions/download-artifact@v4
@@ -87,7 +99,21 @@ jobs:
         shell: bash
         run: |
           set -eu
-          if [ -n "$REQUESTED_VERSION" ]; then
+          if [ -n "$RELEASE_TAG" ]; then
+            case "$RELEASE_TAG" in
+              v[0-9]*) ;;
+              *)
+                printf 'Invalid release tag: %s\n' "$RELEASE_TAG" >&2
+                exit 2
+                ;;
+            esac
+            version="${RELEASE_TAG#v}"
+            if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "$version" ]; then
+              printf 'Version %s does not match release tag %s\n' \
+                "$REQUESTED_VERSION" "$RELEASE_TAG" >&2
+              exit 2
+            fi
+          elif [ -n "$REQUESTED_VERSION" ]; then
             version="$REQUESTED_VERSION"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
@@ -102,6 +128,7 @@ jobs:
             *) ;;
           esac
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'source_revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           printf 'Building USBDisplayStack version %s\n' "$version"
 
       - name: Build and package with PCCT
@@ -149,7 +176,9 @@ jobs:
 
   publish-tag:
     name: publish tagged Debian package
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     runs-on: ubuntu-latest
     needs: debian-package
     permissions:
@@ -158,6 +187,8 @@ jobs:
     env:
       OCI_PACKAGE: ghcr.io/iotsharp/usbdisplaystack-deb
       PACKAGE_VERSION: ${{ needs.debian-package.outputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      SOURCE_REVISION: ${{ needs.debian-package.outputs.source_revision }}
     steps:
       - name: Download Debian package
         uses: actions/download-artifact@v4
@@ -181,13 +212,13 @@ jobs:
             printf 'Expected three release assets, found %s\n' "${#assets[@]}" >&2
             exit 1
           fi
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
               --verify-tag \
-              --title "$GITHUB_REF_NAME" \
+              --title "$RELEASE_TAG" \
               --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
       - name: Install ORAS
         uses: oras-project/setup-oras@v1
@@ -207,10 +238,10 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | oras login ghcr.io \
             --username "$GITHUB_ACTOR" \
             --password-stdin
-          oras push "$OCI_PACKAGE:$GITHUB_REF_NAME" \
+          oras push "$OCI_PACKAGE:$RELEASE_TAG" \
             --artifact-type application/vnd.iotsharp.usbdisplaystack.debian.v1 \
             --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --annotation "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "org.opencontainers.image.revision=$SOURCE_REVISION" \
             --annotation "org.opencontainers.image.version=$PACKAGE_VERSION" \
             --annotation "org.opencontainers.image.title=USBDisplayStack Debian package" \
             "$package:application/vnd.debian.binary-package" \

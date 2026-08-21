@@ -217,8 +217,9 @@ workflow artifact. A `vX.Y.Z` tag uses `X.Y.Z` and also publishes those files to
 the matching GitHub Release. The same tagged files are mirrored in GitHub
 Packages as the OCI artifact `ghcr.io/iotsharp/usbdisplaystack-deb:vX.Y.Z`;
 GitHub Packages does not provide a native Debian/APT package registry. The
-manual workflow dispatch can override the artifact version but does not publish
-a release or package.
+manual workflow dispatch can override the artifact version without publishing.
+Maintainers can instead set `release_tag` to an existing `vX.Y.Z` tag to rebuild
+that tag and recover its Release and Package assets.
 
 The package contains its Debian lifecycle hooks and all project installation
 scripts. It deliberately does not activate the module or select the physical
