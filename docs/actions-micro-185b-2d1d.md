@@ -119,6 +119,11 @@ The virtual mode must have even dimensions because the current encoder output
 is baseline H.264 in `yuv420p`. XRGB8888 and RGB565 input are accepted.
 Encoded NAL units are normalized to four-byte Annex-B start codes before
 transport, matching the captured stream accepted by the adapter.
+An encoder restart is handled inside the existing backend session with one
+bounded same-frame retry. Its first access unit must contain SPS, PPS, and IDR
+before it is submitted; the HID command and video sequence numbers remain
+monotonic, so an encoder-only failure does not trigger full bootstrap or a
+ready-file generation change.
 Initialization preserves captured relative timing. Heartbeats continue through
 the backend ABI's idle `tick`, including while the screen is static. Each tick
 also polls and reads both HID input interfaces. After at least one heartbeat has
@@ -137,7 +142,8 @@ the marker disappeared and reappeared between their readiness checks.
 
 ## Remaining validation work
 
-- validate the meaning of status input reports, backpressure, and frame dropping;
+- use the bounded HID input samples to validate the meaning of status reports,
+  backpressure, and frame dropping;
 - replace or supplement `USBDEVFS_RESET` with a recovery action that the target
   firmware demonstrably treats like a physical power cycle;
 - validate long-running behavior.
@@ -152,6 +158,31 @@ host-side recovery attempt, but it is not proven equivalent to removing USB
 power for this firmware. Host readiness, heartbeat, and frame counters alone
 must not be reported as physical display recovery.
 
+## 2026-08-21 encoder and USB topology findings
+
+Lane 179 exposes the adapter directly as xHCI root-hub port `1-6`. The root
+hub descriptor reports `No power switching`; the device is not behind the
+separate Terminus hub, whose descriptor reports ganged rather than per-port
+power switching. Therefore `USBDEVFS_RESET`, sysfs authorization changes, and
+driver unbind/bind can reset or reprobe the host-side USB session but cannot
+remove VBUS from this physical port. They must not be described as equivalent
+to the unplug/replug that visibly recovered this firmware.
+
+The periodic failures observed after the 0.2.4 deployment were FFmpeg stdout
+EOF events. Immediately before each EOF, command heartbeats and HID input
+reports were still advancing, and the kernel journal had no matching USB
+disconnect or reset. The daemon previously promoted every encoder EOF into a
+full backend reopen; the backend now records the FFmpeg exit code or signal and
+performs one local encoder restart before allowing that escalation.
+
+Metadata-only inspection of the authorized replay found an initial
+configuration message with NAL types `7,8,6`, followed by an IDR message with
+NAL type `5`; the captured firmware-compatible transport did not contain AUD.
+The live encoder still requests AUD from x264 so logs can prove access-unit
+boundaries, but transport continues to omit AUD to match the accepted capture.
+After a local encoder restart, the backend requires SPS, PPS, and IDR and logs
+the source AUD observation before completing the handoff.
+
 ## 2026-08-20 physical-link follow-up
 
 The next investigation must start at the USB physical path: connect the adapter
@@ -164,6 +195,12 @@ is idle and while frames are moving. The source-specific records are:
 - `hid write failed`: HID endpoint, descriptor, byte offset, total report length,
   and `errno`;
 - `ffmpeg pipe ... failed`: pipe operation, descriptor, and `errno`;
+- `ffmpeg process ... exit|signal` and `encoder local recovery`: child-process
+  cause and the bounded in-session recovery attempt;
+- `encoder handoff complete`: SPS/PPS/IDR and source-AUD evidence for the first
+  frame after encoder creation;
+- `HID input sample`: rate-limited endpoint, report length, and 16-byte prefix
+  used to investigate firmware acknowledgements without dumping full reports;
 - `usb-displayd: transport lost|transport open generation|reopen_count`: the
   observed loss and the number of completed backend reopens.
 - `session watchdog expired|USB reset completed|failed`: the no-input interval

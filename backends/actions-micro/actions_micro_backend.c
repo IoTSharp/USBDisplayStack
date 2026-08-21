@@ -45,6 +45,11 @@
 #define MISSED_HEARTBEAT_LIMIT 3ULL
 #define MAX_INPUT_READS_PER_TICK 32U
 #define HEARTBEAT_LOG_INTERVAL 60U
+/* 输入状态按固定间隔采样；编码故障只允许当前帧本地重试一次。 */
+#define INPUT_SAMPLE_INTERVAL 60U
+#define INPUT_SAMPLE_PREFIX_BYTES 16U
+#define MAX_ENCODER_ATTEMPTS 2U
+#define ENCODER_EXIT_GRACE_NS 20000000L
 #define USB_RESET_MIN_INTERVAL_NS 60000000000ULL
 #define USB_SYSFS_DEVICES "/sys/bus/usb/devices"
 #define USB_DEVICE_NODE_LENGTH 64U
@@ -89,6 +94,8 @@ struct actions_encoder {
 	int input_fd;
 	int output_fd;
 	uint32_t format;
+	/* 编码代次只跟随 FFmpeg 重建，不改变固件传输序号。 */
+	uint64_t generation;
 	unsigned char *packed_frame;
 	size_t packed_capacity;
 	unsigned char *encoded;
@@ -116,21 +123,33 @@ struct actions_context {
 	uint64_t reports;
 	/* 输入与复位状态把无声会话掉线纳入可观测、可恢复的路径。 */
 	uint64_t input_reports;
+	uint64_t input_reports_by_endpoint[2];
 	uint64_t last_input_ns;
 	uint64_t last_heartbeat_sent_ns;
 	uint64_t input_timeout_ns;
 	uint64_t heartbeat_success_count;
+	uint64_t encoder_restarts;
 	uint32_t width;
 	uint32_t height;
 	int hid[2];
 	bool transport_failed;
 	bool usb_reset_attempted;
+	bool encoder_handoff_pending;
 };
 
 struct byte_buffer {
 	unsigned char *data;
 	size_t length;
 	size_t capacity;
+};
+
+/* 首个编码访问单元必须证明参数集和 IDR 完整，AUD 仅记录兼容性证据。 */
+struct nal_summary {
+	bool aud;
+	bool sps;
+	bool pps;
+	bool idr;
+	unsigned int count;
 };
 
 static uint16_t read_le16(const unsigned char *data)
@@ -300,7 +319,7 @@ static int find_actions_micro_usb_node(char device_path[USB_DEVICE_NODE_LENGTH])
 	return result;
 }
 
-/* 会话丢失后用 USBDEVFS_RESET 复现已验证的物理拔插重连前提。 */
+/* 会话丢失后仅尝试主机侧 USB reset；该动作不切断 VBUS，也不等同物理拔插。 */
 static int reset_actions_micro_usb_device(void)
 {
 	char device_path[USB_DEVICE_NODE_LENGTH];
@@ -1031,6 +1050,27 @@ static int send_due_heartbeats(struct actions_context *state, uint64_t now_ns)
 	return result;
 }
 
+/* 固件输入只输出有界前缀和限频计数，便于识别确认报文且不淹没现场日志。 */
+static void log_hid_input_sample(int input_index,
+				 const unsigned char *report, ssize_t bytes_read,
+				 uint64_t endpoint_count)
+{
+	size_t prefix_bytes = (size_t)bytes_read;
+	size_t index = 0;
+
+	if (prefix_bytes > INPUT_SAMPLE_PREFIX_BYTES) {
+		prefix_bytes = INPUT_SAMPLE_PREFIX_BYTES;
+	}
+	fprintf(stderr,
+		"actions-micro: HID input sample input=%d count=%llu bytes=%zd prefix=",
+		input_index, (unsigned long long)endpoint_count, bytes_read);
+	while (index < prefix_bytes) {
+		fprintf(stderr, "%02x", report[index]);
+		++index;
+	}
+	fputc('\n', stderr);
+}
+
 /* tick 轮询两个输入接口并排空缓存，避免固件状态报告在环形缓冲区积压。 */
 static int poll_hid_inputs(struct actions_context *state, uint64_t now_ns)
 {
@@ -1080,6 +1120,14 @@ static int poll_hid_inputs(struct actions_context *state, uint64_t now_ns)
 				if (bytes_read > 0) {
 					state->last_input_ns = now_ns;
 					++state->input_reports;
+					++state->input_reports_by_endpoint[index];
+					/* 前四次及每六十次采样一次，保留状态变化的时间锚点。 */
+					if (state->input_reports_by_endpoint[index] <= 4ULL ||
+					    state->input_reports_by_endpoint[index] %
+						    INPUT_SAMPLE_INTERVAL == 0ULL) {
+						log_hid_input_sample(index, report, bytes_read,
+							state->input_reports_by_endpoint[index]);
+					}
 					++reads;
 					drained = false;
 				} else if (bytes_read == 0) {
@@ -1149,8 +1197,17 @@ static void close_encoder_descriptors(struct actions_encoder *encoder)
 
 static void stop_encoder(struct actions_encoder *encoder)
 {
-	int status;
+	struct timespec exit_grace = {0, ENCODER_EXIT_GRACE_NS};
+	pid_t process = encoder->process;
+	pid_t waited = -1;
+	int status = 0;
+	bool parent_stopped = false;
 
+	/* 关闭管道前先采样退出状态，避免把父进程触发的 EOF 误报为自然退出。 */
+	if (process > 0) {
+		waited = waitpid(process, &status, WNOHANG);
+		parent_stopped = waited == 0;
+	}
 	if (encoder->input_fd >= 0) {
 		close(encoder->input_fd);
 		encoder->input_fd = -1;
@@ -1159,12 +1216,33 @@ static void stop_encoder(struct actions_encoder *encoder)
 		close(encoder->output_fd);
 		encoder->output_fd = -1;
 	}
-	if (encoder->process > 0) {
-		if (waitpid(encoder->process, &status, WNOHANG) == 0) {
-			kill(encoder->process, SIGTERM);
-			while (waitpid(encoder->process, &status, 0) < 0 &&
+	/* stdout EOF 后给 FFmpeg 有界收尾窗口，优先保留真实退出码或信号。 */
+	if (process > 0 && waited == 0) {
+		(void)nanosleep(&exit_grace, NULL);
+		waited = waitpid(process, &status, WNOHANG);
+	}
+	if (process > 0) {
+		if (waited == 0) {
+			(void)kill(process, SIGTERM);
+			while ((waited = waitpid(process, &status, 0)) < 0 &&
 			       errno == EINTR) {
 			}
+		}
+		/* 区分自然退出与后端主动停止，定位无 stderr 的 FFmpeg EOF。 */
+		if (waited == process && WIFEXITED(status)) {
+			fprintf(stderr,
+				"actions-micro: ffmpeg process %s pid=%ld exit=%d\n",
+				parent_stopped ? "stopped" : "exited",
+				(long)process, WEXITSTATUS(status));
+		} else if (waited == process && WIFSIGNALED(status)) {
+			fprintf(stderr,
+				"actions-micro: ffmpeg process %s pid=%ld signal=%d\n",
+				parent_stopped ? "stopped" : "exited",
+				(long)process, WTERMSIG(status));
+		} else if (waited < 0 && errno != ECHILD) {
+			fprintf(stderr,
+				"actions-micro: ffmpeg waitpid failed pid=%ld errno=%d (%s)\n",
+				(long)process, errno, strerror(errno));
 		}
 		encoder->process = -1;
 	}
@@ -1265,6 +1343,9 @@ static int start_encoder(struct actions_context *state, uint32_t format)
 			result = -errno;
 		} else {
 			state->encoder.format = format;
+			/* 新编码器首帧必须重新交接参数集和 IDR，但 USB 序号保持连续。 */
+			++state->encoder.generation;
+			state->encoder_handoff_pending = true;
 		}
 	}
 	if (input_pipe[1] >= 0) {
@@ -1461,7 +1542,8 @@ static int append_annex_b_nal(struct byte_buffer *buffer,
 
 static int split_access_unit(const unsigned char *data, size_t length,
 			     struct byte_buffer *configuration,
-			     struct byte_buffer *video, bool *idr)
+			     struct byte_buffer *video, bool *idr,
+			     struct nal_summary *summary)
 {
 	size_t start_length;
 	size_t next_start_length = 0;
@@ -1471,6 +1553,7 @@ static int split_access_unit(const unsigned char *data, size_t length,
 	int result = 0;
 
 	*idr = false;
+	memset(summary, 0, sizeof(*summary));
 	while (start < length && result == 0) {
 		next = find_start_code(data, length, start + start_length + 1,
 				       &next_start_length);
@@ -1479,11 +1562,17 @@ static int split_access_unit(const unsigned char *data, size_t length,
 			break;
 		}
 		nal_type = data[start + start_length] & 0x1fU;
+		++summary->count;
+		summary->aud = summary->aud || nal_type == 9;
+		summary->sps = summary->sps || nal_type == 7;
+		summary->pps = summary->pps || nal_type == 8;
+		summary->idr = summary->idr || nal_type == 5;
 		if (nal_type == 6 || nal_type == 7 || nal_type == 8) {
 			result = append_annex_b_nal(configuration, data + start,
 						    next - start,
 						    start_length);
 		} else if (nal_type != 9) {
+			/* 授权 replay 的固件序列不含 AUD，继续只传参数集和图像 NAL。 */
 			result = append_annex_b_nal(video, data + start,
 						    next - start,
 						    start_length);
@@ -1571,15 +1660,59 @@ static int send_video_message(struct actions_context *state,
 	return result;
 }
 
+/* 单次编码尝试只处理 FFmpeg 和 NAL 拆分，USB/HID 发送必须在成功后执行。 */
+static int encode_frame_once(struct actions_context *state,
+			     const struct usbdisplay_frame *frame,
+			     size_t packed_bytes,
+			     struct byte_buffer *configuration,
+			     struct byte_buffer *video, bool *idr,
+			     struct nal_summary *summary)
+{
+	size_t encoded_bytes = 0;
+	int result = 0;
+
+	if (state->encoder.format != frame->format) {
+		result = start_encoder(state, frame->format);
+	}
+	if (result == 0) {
+		result = write_all_logged(state->encoder.input_fd,
+					  state->encoder.packed_frame, packed_bytes,
+					  "ffmpeg input pipe");
+	}
+	if (result == 0) {
+		result = read_encoded_access_unit(state, &encoded_bytes);
+	}
+	if (result == 0) {
+		result = split_access_unit(state->encoder.encoded, encoded_bytes,
+					   configuration, video, idr, summary);
+	}
+	/* 编码器重建后的首帧缺参数集或 IDR 时不得交给仍存活的固件会话。 */
+	if (result == 0 && state->encoder_handoff_pending &&
+	    (!summary->sps || !summary->pps || !summary->idr)) {
+		fprintf(stderr,
+			"actions-micro: incomplete encoder handoff generation=%llu "
+			"nal-count=%u aud=%u sps=%u pps=%u idr=%u\n",
+			(unsigned long long)state->encoder.generation,
+			summary->count, summary->aud ? 1U : 0U,
+			summary->sps ? 1U : 0U, summary->pps ? 1U : 0U,
+			summary->idr ? 1U : 0U);
+		result = -EPROTO;
+	}
+
+	return result;
+}
+
 static int actions_submit(void *context,
 			  const struct usbdisplay_frame *frame)
 {
 	struct actions_context *state = context;
 	struct byte_buffer configuration = {0};
 	struct byte_buffer video = {0};
+	struct nal_summary summary = {0};
 	size_t packed_bytes = 0;
-	size_t encoded_bytes = 0;
 	bool idr = false;
+	bool encoded = false;
+	unsigned int attempt = 0;
 	int result = 0;
 
 	if (frame->width != state->width || frame->height != state->height) {
@@ -1588,23 +1721,32 @@ static int actions_submit(void *context,
 	if (result == 0) {
 		result = send_due_heartbeats(state, monotonic_nanoseconds());
 	}
-	if (result == 0 && state->encoder.format != frame->format) {
-		result = start_encoder(state, frame->format);
-	}
 	if (result == 0) {
 		result = pack_frame(state, frame, &packed_bytes);
 	}
-	if (result == 0) {
-		result = write_all_logged(state->encoder.input_fd,
-					   state->encoder.packed_frame, packed_bytes,
-					   "ffmpeg input pipe");
-	}
-	if (result == 0) {
-		result = read_encoded_access_unit(state, &encoded_bytes);
-	}
-	if (result == 0) {
-		result = split_access_unit(state->encoder.encoded, encoded_bytes,
-					   &configuration, &video, &idr);
+	/* 编码器 EOF 不等于 USB 会话丢失；原帧最多本地重建并重试一次。 */
+	while (result == 0 && !encoded && attempt < MAX_ENCODER_ATTEMPTS) {
+		configuration.length = 0;
+		video.length = 0;
+		idr = false;
+		memset(&summary, 0, sizeof(summary));
+		result = encode_frame_once(state, frame, packed_bytes,
+					   &configuration, &video, &idr, &summary);
+		++attempt;
+		if (result == 0) {
+			encoded = true;
+		} else if (attempt < MAX_ENCODER_ATTEMPTS) {
+			++state->encoder_restarts;
+			fprintf(stderr,
+				"actions-micro: encoder local recovery attempt=%u "
+				"generation=%llu frames=%llu video-sequence=%u error=%s\n",
+				attempt,
+				(unsigned long long)state->encoder.generation,
+				(unsigned long long)state->frames,
+				state->video_sequence, strerror(-result));
+			stop_encoder(&state->encoder);
+			result = 0;
+		}
 	}
 	if (result == 0 && configuration.length != 0) {
 		result = send_video_message(state, VIDEO_CONFIG,
@@ -1617,6 +1759,18 @@ static int actions_submit(void *context,
 	if (result == 0) {
 		result = send_video_message(state, idr ? VIDEO_IDR : VIDEO_P,
 					    video.data, video.length);
+	}
+	if (result == 0 && state->encoder_handoff_pending) {
+		/* replay 首段无 AUD；日志保留源 AUD 与实际参数集/IDR 交接证据。 */
+		fprintf(stderr,
+			"actions-micro: encoder handoff complete generation=%llu "
+			"nal-count=%u source-aud=%u sps=%u pps=%u idr=%u "
+			"video-sequence=%u\n",
+			(unsigned long long)state->encoder.generation,
+			summary.count, summary.aud ? 1U : 0U,
+			summary.sps ? 1U : 0U, summary.pps ? 1U : 0U,
+			summary.idr ? 1U : 0U, state->video_sequence - 1U);
+		state->encoder_handoff_pending = false;
 	}
 	if (result == 0) {
 		++state->frames;
@@ -1668,12 +1822,18 @@ static void actions_close(void *context)
 		close_hidraw_descriptors(state);
 		if (state->frames != 0 || state->reports != 0 ||
 		    state->input_reports != 0) {
+			/* 关闭摘要同时区分输入端点与本地编码恢复，不再混同 USB 重开。 */
 			fprintf(stderr,
 				"actions-micro: closed frames=%llu reports=%llu "
-				"input-reports=%llu\n",
+				"input-reports=%llu input0=%llu input1=%llu "
+				"encoder-generation=%llu encoder-restarts=%llu\n",
 				(unsigned long long)state->frames,
 				(unsigned long long)state->reports,
-				(unsigned long long)state->input_reports);
+				(unsigned long long)state->input_reports,
+				(unsigned long long)state->input_reports_by_endpoint[0],
+				(unsigned long long)state->input_reports_by_endpoint[1],
+				(unsigned long long)state->encoder.generation,
+				(unsigned long long)state->encoder_restarts);
 		}
 		free(state->encoder.encoded);
 		free(state->encoder.packed_frame);

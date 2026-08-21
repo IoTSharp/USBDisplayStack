@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recover a failed persistent FFmpeg process inside the Actions Micro backend
+  with one bounded same-frame retry, while preserving the live HID transport
+  session and its command/video sequence numbers.
+- Verify that each encoder handoff contains SPS, PPS, and IDR NAL units; report
+  the FFmpeg exit status, bounded HID input samples, and encoder generations.
 - Add dual-hidraw input polling, a missed-heartbeat session watchdog, and a
   VID/PID-scoped `USBDEVFS_RESET` before Actions Micro transport reopen.
 - Reopen the kernel frame stream after transport recovery, resubmit the newest
