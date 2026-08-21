@@ -344,11 +344,16 @@ static void splash_display_icon(struct splash_surface *surface, int center_x,
 
 size_t usbdisplay_splash_bytes(uint32_t width, uint32_t height)
 {
+	size_t row_bytes = 0;
 	size_t result = 0;
 
-	if (width > 0 && height > 0 && width <= SIZE_MAX / 4U &&
-	    (size_t)width * 4U <= SIZE_MAX / height) {
-		result = (size_t)width * height * 4U;
+	/* 乘法后用除法回验，兼容 32 位 PCCT 和 64 位 GitHub runner 的严格告警。 */
+	if (width > 0 && height > 0) {
+		row_bytes = (size_t)width * sizeof(uint32_t);
+		if (row_bytes / sizeof(uint32_t) == (size_t)width &&
+		    row_bytes <= SIZE_MAX / (size_t)height) {
+			result = row_bytes * (size_t)height;
+		}
 	}
 
 	return result;

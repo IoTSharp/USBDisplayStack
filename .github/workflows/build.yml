@@ -27,55 +27,10 @@ jobs:
 
   kernel-4-15:
     runs-on: ubuntu-latest
-    container: ubuntu:18.04
-    steps:
-      - name: Install Linux 4.15 build dependencies
-        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates git linux-headers-generic
-      - name: Check out the triggering revision
-        run: |
-          git init .
-          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
-      - name: Build module
-        run: |
-          KDIR=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
-          test -n "$KDIR"
-          test -d "$KDIR"
-          make module KDIR="$KDIR"
-
-  debian-package:
-    name: package Debian artifact
-    runs-on: ubuntu-latest
     env:
       KERNEL_RELEASE: 4.15.0-60-generic
-      KERNEL_ARCHITECTURE: i386
-      PCCT_IMAGE: ghcr.io/iotsharp/pcct-build-x86:latest
-      REQUESTED_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v5
-
-      - name: Resolve package version
-        id: version
-        shell: bash
-        run: |
-          set -eu
-          if [ -n "$REQUESTED_VERSION" ]; then
-            version="$REQUESTED_VERSION"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="0.0.0-ci.${GITHUB_RUN_NUMBER}"
-          fi
-          case "$version" in
-            ''|[!0-9]*|*[!0-9A-Za-z.+~-]*)
-              printf 'Invalid package version: %s\n' "$version" >&2
-              exit 2
-              ;;
-            *) ;;
-          esac
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          printf 'Building USBDisplayStack version %s\n' "$version"
 
       - name: Build target-kernel module without a bind mount
         shell: bash
@@ -98,6 +53,54 @@ jobs:
           docker cp ./. "$container_name:/src"
           docker start --attach "$container_name"
           docker cp "$container_name:/src/kernel/usbdisplay.ko" "$RUNNER_TEMP/usbdisplay.ko"
+
+      - name: Upload target-kernel module for packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbdisplay-kernel-4.15.0-60-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ runner.temp }}/usbdisplay.ko
+
+  debian-package:
+    name: package Debian artifact
+    runs-on: ubuntu-latest
+    needs: kernel-4-15
+    env:
+      KERNEL_RELEASE: 4.15.0-60-generic
+      KERNEL_ARCHITECTURE: i386
+      PCCT_IMAGE: ghcr.io/iotsharp/pcct-build-x86:latest
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download target-kernel module
+        uses: actions/download-artifact@v4
+        with:
+          name: usbdisplay-kernel-4.15.0-60-${{ github.run_id }}
+          path: ${{ runner.temp }}
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          set -eu
+          if [ -n "$REQUESTED_VERSION" ]; then
+            version="$REQUESTED_VERSION"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
+          case "$version" in
+            ''|[!0-9]*|*[!0-9A-Za-z.+~-]*)
+              printf 'Invalid package version: %s\n' "$version" >&2
+              exit 2
+              ;;
+            *) ;;
+          esac
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'Building USBDisplayStack version %s\n' "$version"
 
       - name: Build and package with PCCT
         shell: pwsh

@@ -49,7 +49,10 @@ DEB_ARCH="$PACKAGE_ARCH" \
 try {
     & docker image inspect $Image | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "PCCT image is unavailable: $Image"
+        & docker pull $Image
+        if ($LASTEXITCODE -ne 0) {
+            throw "PCCT image is unavailable: $Image"
+        }
     }
 
     $containerId = (& docker create --name $containerName `
