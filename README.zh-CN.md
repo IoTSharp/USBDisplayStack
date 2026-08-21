@@ -12,7 +12,9 @@ DRM/KMS 设备渲染；协议、压缩和 USB 传输由可替换的用户态后�
 
 ## 快速安装
 
-CI 会生成一个与目标内核绑定的 Debian 安装包。打开
+CI 会生成一个与目标内核绑定的 Debian 安装包。正式标签版本可直接打开
+[GitHub Releases](https://github.com/IoTSharp/USBDisplayStack/releases)，下载对应
+版本的 `.deb` 资产。分支构建或手动 CI 构建则打开
 [GitHub Actions](https://github.com/IoTSharp/USBDisplayStack/actions)，进入成功的
 `build` 任务，下载 `usbdisplay-stack-deb-<版本>` artifact，并解压其中的
 `.deb` 文件。
@@ -187,8 +189,11 @@ pwsh ./scripts/build-pcct-deb.ps1 \
 ```
 
 GitHub Actions 会在每次 push 和 pull request 时执行同一套 PCCT 打包流程，并上传
-`.deb`、SHA-256 校验文件和离线安装脚本作为 workflow artifact。推送 `vX.Y.Z` 标签
-时使用 `X.Y.Z` 作为包版本；也可以手动运行 workflow 并填写版本号。
+`.deb`、SHA-256 校验文件和离线安装脚本作为 workflow artifact。推送 `vX.Y.Z`
+标签时使用 `X.Y.Z` 作为包版本，并把这三个文件上传到同名 GitHub Release；同时
+以 OCI artifact `ghcr.io/iotsharp/usbdisplaystack-deb:vX.Y.Z` 镜像到 GitHub
+Packages。GitHub Packages 本身不提供原生 Debian/APT 软件源类型。手动运行
+workflow 可以填写 artifact 版本号，但不会发布 Release 或 Package。
 
 DEB 已包含 Debian 生命周期脚本和项目的全部安装/卸载脚本。出于现场安全和
 replay 授权边界，安装后仍不会自动加载模块、选择实体后端或启动服务。离线安装、

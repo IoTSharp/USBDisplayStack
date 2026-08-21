@@ -13,7 +13,9 @@ stay in replaceable userspace backends.
 
 ## Quick install
 
-The CI pipeline publishes one kernel-bound Debian package. Open
+The CI pipeline publishes one kernel-bound Debian package. For a tagged
+version, open [GitHub Releases](https://github.com/IoTSharp/USBDisplayStack/releases)
+and download its `.deb` asset. For a branch or manual CI build, open
 [GitHub Actions](https://github.com/IoTSharp/USBDisplayStack/actions), select a
 successful `build` run, download the `usbdisplay-stack-deb-<version>` artifact,
 and extract its `.deb` file.
@@ -211,8 +213,12 @@ pwsh ./scripts/build-pcct-deb.ps1 \
 
 GitHub Actions runs the same PCCT packaging path on every push and pull request.
 It uploads the `.deb`, its SHA-256 sidecar, and the offline installer as a
-workflow artifact. A `vX.Y.Z` tag uses `X.Y.Z`; the manual workflow dispatch can
-override the version when a release artifact is needed.
+workflow artifact. A `vX.Y.Z` tag uses `X.Y.Z` and also publishes those files to
+the matching GitHub Release. The same tagged files are mirrored in GitHub
+Packages as the OCI artifact `ghcr.io/iotsharp/usbdisplaystack-deb:vX.Y.Z`;
+GitHub Packages does not provide a native Debian/APT package registry. The
+manual workflow dispatch can override the artifact version but does not publish
+a release or package.
 
 The package contains its Debian lifecycle hooks and all project installation
 scripts. It deliberately does not activate the module or select the physical
