@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add dual-hidraw input polling, a missed-heartbeat session watchdog, and a
+  VID/PID-scoped `USBDEVFS_RESET` before Actions Micro transport reopen.
+- Reopen the kernel frame stream after transport recovery, resubmit the newest
+  frame every two idle seconds, and publish a monotonic ready-file generation.
 - Add a kernel-version-bound offline Debian package, SHA-256 sidecar, and an
   explicit installer that never falls back to a network package source.
 - Add `usbdisplay-check` with human-readable and JSON physical-readiness

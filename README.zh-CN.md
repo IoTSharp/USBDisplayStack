@@ -99,12 +99,12 @@ sudo rmmod usbdisplay
 第二设备的编号不保证为 `1`。生产脚本应通过 sysfs 中的 `usbdisplay`
 framebuffer 名称和 DRM 驱动名称发现节点。
 
-生产守护进程在后端打开成功后写入包含 `pid`、`backend` 和 `physical` 的
-`/run/usbdisplay/ready`；只有 `physical=1` 才表示真实物理传输已就绪，`null`
-和 `ppm` 诊断后端会明确写入 `physical=0`。HID 断开时清理该文件，并在同一
-进程内等待重连。第二屏程序必须校验该文件和守护进程 PID，不能仅凭 `/dev/fb1`
-存在就认为 HDMI 已连接。可通过 `--ready-file PATH` 和 `--retry-ms N` 调整路径
-与重连间隔。
+生产守护进程在后端打开成功后写入包含 `pid`、`generation`、`backend` 和
+`physical` 的 `/run/usbdisplay/ready`；只有 `generation>0` 且 `physical=1`
+才表示真实物理传输已就绪，`null` 和 `ppm` 诊断后端会明确写入 `physical=0`。
+HID 断开时清理该文件，在同一进程内等待重连，并在恢复后递增代数。第二屏程序
+必须校验该文件和守护进程 PID，不能仅凭 `/dev/fb1` 存在就认为 HDMI 已连接。
+可通过 `--ready-file PATH` 和 `--retry-ms N` 调整路径与重连间隔。
 
 ## 应用示例
 

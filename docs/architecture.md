@@ -50,12 +50,14 @@ unrelated backends to change.
 Backends may request a periodic `tick` callback. This keeps control traffic
 alive even when fbdev or DRM has not published a new frame.
 
-The daemon publishes a PID-bearing readiness file after the backend opens. The
-file also carries `physical=1` only for a backend that owns a physical display
-transport; diagnostic backends publish `physical=0`. On a backend open or
-submit failure it removes the file, closes the backend, and retries in the same
-process. Real display consumers must require both a live daemon PID and
-`physical=1`; the virtual framebuffer can exist while no USB adapter is present.
+The daemon publishes a readiness file after the backend opens. The file carries
+the live daemon PID, a positive transport `generation`, and `physical=1` only
+for a backend that owns a physical display transport; diagnostic backends
+publish `physical=0`. On a backend open or submit failure it removes the file,
+closes the backend, and retries in the same process. A completed reopen
+increments the generation. Real display consumers must require a live daemon
+PID, a positive generation, and `physical=1`; the virtual framebuffer can exist
+while no USB adapter is present.
 
 A backend owns all protocol-specific work:
 

@@ -120,15 +120,37 @@ is baseline H.264 in `yuv420p`. XRGB8888 and RGB565 input are accepted.
 Encoded NAL units are normalized to four-byte Annex-B start codes before
 transport, matching the captured stream accepted by the adapter.
 Initialization preserves captured relative timing. Heartbeats continue through
-the backend ABI's idle `tick`, including while the screen is static. Any HID,
-encoder, timeout, or protocol failure terminates the daemon so systemd can
-restart the complete activation sequence.
+the backend ABI's idle `tick`, including while the screen is static. Each tick
+also polls and reads both HID input interfaces. After at least one heartbeat has
+been sent, three heartbeat periods with no device input (with a five-second
+minimum) are treated as a lost firmware session.
+
+On a HID error or session-watchdog timeout, the backend closes both stale
+hidraw descriptors, locates the unique `185b:2d1d` USB device through sysfs,
+and issues `USBDEVFS_RESET` to its `/dev/bus/usb/BBB/DDD` node before the daemon
+reopens the backend. The daemon then close/opens `/dev/usbdisplay0`, which makes
+the kernel's `last_sequence` fallback deliver the latest frame immediately.
+It also resubmits the latest frame every two seconds while the producer is
+idle. Each successful transport open atomically publishes `generation=N` in
+the ready file so framebuffer consumers can force a complete redraw even when
+the marker disappeared and reappeared between their readiness checks.
 
 ## Remaining validation work
 
-- handle status input, backpressure, and frame dropping;
-- repeat physical power-cycle and reconnect tests;
+- validate the meaning of status input reports, backpressure, and frame dropping;
+- replace or supplement `USBDEVFS_RESET` with a recovery action that the target
+  firmware demonstrably treats like a physical power cycle;
 - validate long-running behavior.
+
+Lane 179 field validation on 2026-08-21 proved that HID input reports continue
+to increase and that a real unplug/replug recovers through full bootstrap,
+generation change, retained/new frame delivery, and a stable LVGL screen.
+However, an injected HID write failure followed by a successful
+`USBDEVFS_RESET`, full bootstrap, and generation change left the physical
+display on its connecting page. Therefore usbfs reset is currently a useful
+host-side recovery attempt, but it is not proven equivalent to removing USB
+power for this firmware. Host readiness, heartbeat, and frame counters alone
+must not be reported as physical display recovery.
 
 ## 2026-08-20 physical-link follow-up
 
@@ -144,8 +166,12 @@ is idle and while frames are moving. The source-specific records are:
 - `ffmpeg pipe ... failed`: pipe operation, descriptor, and `errno`;
 - `usb-displayd: transport lost|transport open generation|reopen_count`: the
   observed loss and the number of completed backend reopens.
+- `session watchdog expired|USB reset completed|failed`: the no-input interval
+  and whether the matching usbfs device accepted `USBDEVFS_RESET`.
 
 A replay, simulated error, or a clean uninterrupted run is not a physical-link
-recovery test. Do not call the issue fully resolved until one real unplug/replug
-or equivalent USB link-loss test shows the existing daemon returning to a ready
-state, sending heartbeats, and delivering new HDMI frames after recovery.
+recovery test. A recovery mechanism passes only when a real stalled session or
+equivalent automated fault shows the daemon incrementing `generation`,
+returning to a ready state, sending heartbeats, delivering retained and new
+HDMI frames, and the physical display visibly returning to stable live output
+without a manual unplug/replug.

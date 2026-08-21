@@ -85,7 +85,7 @@ sudo sh ./install-usbdisplay-offline.sh \
 默认检查必须同时满足以下条件才返回 `0`：
 
 - `usbdisplay` 内核模块、流设备和同名 framebuffer 均存在；
-- `/run/usbdisplay/ready` 格式有效，其中的 PID 仍是 `usb-displayd`；
+- `/run/usbdisplay/ready` 格式有效，其中代数大于零且 PID 仍是 `usb-displayd`；
 - 后端声明 `physical=1`；
 - USB 总线上仍存在 `185b:2d1d` 适配器。
 

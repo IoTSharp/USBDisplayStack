@@ -3,9 +3,12 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/hidraw.h>
+#include <linux/usbdevice_fs.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -37,6 +40,14 @@
 #define DEFAULT_ENCODE_TIMEOUT_MS 2000U
 #define DEFAULT_HEARTBEAT_US 1000000ULL
 #define MAX_HEARTBEATS_PER_TICK 4U
+/* 会话看门狗至少观察五秒，避免在短暂静默窗口内误判设备输入丢失。 */
+#define MIN_SESSION_INPUT_TIMEOUT_NS 5000000000ULL
+#define MISSED_HEARTBEAT_LIMIT 3ULL
+#define MAX_INPUT_READS_PER_TICK 32U
+#define HEARTBEAT_LOG_INTERVAL 60U
+#define USB_RESET_MIN_INTERVAL_NS 60000000000ULL
+#define USB_SYSFS_DEVICES "/sys/bus/usb/devices"
+#define USB_DEVICE_NODE_LENGTH 64U
 
 #define VIDEO_CONFIG 0x800U
 #define VIDEO_IDR 0x200U
@@ -103,9 +114,17 @@ struct actions_context {
 	uint8_t next_command_endpoint;
 	uint64_t frames;
 	uint64_t reports;
+	/* 输入与复位状态把无声会话掉线纳入可观测、可恢复的路径。 */
+	uint64_t input_reports;
+	uint64_t last_input_ns;
+	uint64_t last_heartbeat_sent_ns;
+	uint64_t input_timeout_ns;
+	uint64_t heartbeat_success_count;
 	uint32_t width;
 	uint32_t height;
 	int hid[2];
+	bool transport_failed;
+	bool usb_reset_attempted;
 };
 
 struct byte_buffer {
@@ -152,6 +171,217 @@ static uint64_t monotonic_nanoseconds(void)
 	return result;
 }
 
+/* USB 设备号只能从 sysfs 属性文件读取，不能拿 hidraw 编号猜测总线端口。 */
+static int read_unsigned_file(const char *path, int base, unsigned int *value)
+{
+	FILE *stream = NULL;
+	char text[32];
+	char *end = NULL;
+	unsigned long parsed = 0;
+	int result = 0;
+
+	stream = fopen(path, "r");
+	if (stream == NULL) {
+		result = -errno;
+	} else if (fgets(text, sizeof(text), stream) == NULL) {
+		result = ferror(stream) != 0 && errno != 0 ? -errno : -EIO;
+	}
+	if (result == 0) {
+		errno = 0;
+		parsed = strtoul(text, &end, base);
+		while (end != NULL && (*end == ' ' || *end == '\t' ||
+		       *end == '\r' || *end == '\n')) {
+			++end;
+		}
+		if (errno != 0 || end == text || end == NULL || *end != '\0' ||
+		    parsed > UINT_MAX) {
+			result = -EINVAL;
+		} else {
+			*value = (unsigned int)parsed;
+		}
+	}
+	if (stream != NULL && fclose(stream) != 0 && result == 0) {
+		result = -errno;
+	}
+
+	return result;
+}
+
+/* 仅在 VID/PID 唯一匹配时返回 usbfs 节点，防止复位同型号的另一台适配器。 */
+static int find_actions_micro_usb_node(char device_path[USB_DEVICE_NODE_LENGTH])
+{
+	DIR *directory = NULL;
+	struct dirent *entry;
+	char attribute_path[PATH_MAX];
+	unsigned int vendor;
+	unsigned int product;
+	unsigned int bus_number;
+	unsigned int device_number;
+	unsigned int matches = 0U;
+	int path_length;
+	int vendor_result = -ENOENT;
+	int product_result = -ENOENT;
+	int bus_result = -ENOENT;
+	int device_result = -ENOENT;
+	int result = 0;
+
+	directory = opendir(USB_SYSFS_DEVICES);
+	if (directory == NULL) {
+		result = -errno;
+	}
+	while (result == 0 && directory != NULL &&
+	       (entry = readdir(directory)) != NULL) {
+		path_length = snprintf(attribute_path, sizeof(attribute_path),
+			"%s/%s/idVendor", USB_SYSFS_DEVICES, entry->d_name);
+		if (path_length < 0 || (size_t)path_length >= sizeof(attribute_path)) {
+			result = -ENAMETOOLONG;
+		} else {
+			vendor_result = read_unsigned_file(attribute_path, 16, &vendor);
+			path_length = snprintf(attribute_path, sizeof(attribute_path),
+				"%s/%s/idProduct", USB_SYSFS_DEVICES,
+				entry->d_name);
+			if (path_length < 0 ||
+			    (size_t)path_length >= sizeof(attribute_path)) {
+				result = -ENAMETOOLONG;
+				product_result = -ENAMETOOLONG;
+			} else {
+				product_result = read_unsigned_file(attribute_path, 16,
+							    &product);
+			}
+		}
+		if (result == 0 && vendor_result == 0 && product_result == 0 &&
+		    vendor == ACTIONS_MICRO_VID && product == ACTIONS_MICRO_PID) {
+			path_length = snprintf(attribute_path, sizeof(attribute_path),
+				"%s/%s/busnum", USB_SYSFS_DEVICES, entry->d_name);
+			if (path_length < 0 ||
+			    (size_t)path_length >= sizeof(attribute_path)) {
+				result = -ENAMETOOLONG;
+				bus_result = -ENAMETOOLONG;
+			} else {
+				bus_result = read_unsigned_file(attribute_path, 10,
+							&bus_number);
+			}
+			path_length = snprintf(attribute_path, sizeof(attribute_path),
+				"%s/%s/devnum", USB_SYSFS_DEVICES, entry->d_name);
+			if (path_length < 0 ||
+			    (size_t)path_length >= sizeof(attribute_path)) {
+				result = -ENAMETOOLONG;
+				device_result = -ENAMETOOLONG;
+			} else {
+				device_result = read_unsigned_file(attribute_path, 10,
+							   &device_number);
+			}
+			if (result == 0 && bus_result == 0 && device_result == 0 &&
+			    bus_number <= 999U && device_number <= 999U) {
+				++matches;
+				path_length = snprintf(device_path,
+					USB_DEVICE_NODE_LENGTH,
+					"/dev/bus/usb/%03u/%03u", bus_number,
+					device_number);
+				if (path_length < 0 ||
+				    path_length >= (int)USB_DEVICE_NODE_LENGTH) {
+					result = -ENAMETOOLONG;
+				} else if (matches > 1U) {
+					result = -EEXIST;
+				}
+			} else if (result == 0 &&
+				   (bus_result != 0 || device_result != 0)) {
+				result = bus_result != 0 ? bus_result : device_result;
+			}
+		}
+	}
+	if (directory != NULL && closedir(directory) != 0 && result == 0) {
+		result = -errno;
+	}
+	if (result == 0 && matches == 0U) {
+		result = -ENODEV;
+	}
+
+	return result;
+}
+
+/* 会话丢失后用 USBDEVFS_RESET 复现已验证的物理拔插重连前提。 */
+static int reset_actions_micro_usb_device(void)
+{
+	char device_path[USB_DEVICE_NODE_LENGTH];
+	int descriptor = -1;
+	int result = 0;
+
+	result = find_actions_micro_usb_node(device_path);
+	if (result == 0) {
+		descriptor = open(device_path, O_RDWR | O_CLOEXEC);
+		if (descriptor < 0) {
+			result = -errno;
+		}
+	}
+	if (result == 0 && ioctl(descriptor, USBDEVFS_RESET, 0) != 0) {
+		result = -errno;
+	}
+	if (descriptor >= 0 && close(descriptor) != 0 && result == 0) {
+		result = -errno;
+	}
+	if (result == 0) {
+		fprintf(stderr, "actions-micro: USB reset completed path=%s\n",
+			device_path);
+	} else {
+		fprintf(stderr, "actions-micro: USB reset failed: %s\n",
+			strerror(-result));
+	}
+
+	return result;
+}
+
+/* 复位前先关闭现有的 hidraw 会话，确保后续 open 只接管重新枚举后的节点。 */
+static void close_hidraw_descriptors(struct actions_context *state)
+{
+	if (state->hid[1] >= 0) {
+		close(state->hid[1]);
+		state->hid[1] = -1;
+	}
+	if (state->hid[0] >= 0) {
+		close(state->hid[0]);
+		state->hid[0] = -1;
+	}
+}
+
+/* 每个后端会话最多复位一次，原始错误继续交给守护进程触发重开。 */
+static int recover_failed_transport(struct actions_context *state,
+				    int session_result)
+{
+	/*
+	 * The context is recreated on every reopen, so per-session flags
+	 * cannot rate-limit resets across sessions. This static persists for
+	 * the lifetime of the loaded backend and keeps a misbehaving device
+	 * from being bus-reset more than once per minute.
+	 */
+	static uint64_t last_reset_ns;
+	uint64_t now_ns;
+	int reset_result = 0;
+	int result = session_result;
+
+	if (state != NULL && state->transport_failed &&
+	    !state->usb_reset_attempted) {
+		state->usb_reset_attempted = true;
+		close_hidraw_descriptors(state);
+		now_ns = monotonic_nanoseconds();
+		if (last_reset_ns != 0 && now_ns >= last_reset_ns &&
+		    now_ns - last_reset_ns < USB_RESET_MIN_INTERVAL_NS) {
+			fprintf(stderr,
+				"actions-micro: USB reset skipped, last one %llums ago\n",
+				(unsigned long long)((now_ns - last_reset_ns) /
+						     1000000ULL));
+		} else {
+			last_reset_ns = now_ns;
+			reset_result = reset_actions_micro_usb_device();
+			if (result == 0) {
+				result = reset_result;
+			}
+		}
+	}
+
+	return result;
+}
+
 static int sleep_until_ns(uint64_t target_ns)
 {
 	struct timespec delay;
@@ -163,7 +393,12 @@ static int sleep_until_ns(uint64_t target_ns)
 		remaining_ns = target_ns - now_ns;
 		delay.tv_sec = (time_t)(remaining_ns / 1000000000ULL);
 		delay.tv_nsec = (long)(remaining_ns % 1000000000ULL);
-		if (nanosleep(&delay, NULL) != 0 && errno != EINTR) {
+		if (nanosleep(&delay, NULL) != 0) {
+			/*
+			 * Abort the replay on any signal so a multi-second
+			 * bootstrap does not delay daemon shutdown; the
+			 * daemon's retry loop absorbs a spurious abort.
+			 */
 			result = -errno;
 		}
 		now_ns = monotonic_nanoseconds();
@@ -614,6 +849,8 @@ static int send_report(struct actions_context *state, uint8_t endpoint,
 		if (result == 0) {
 			++state->reports;
 		} else {
+			/* HID 写失败视作传输会话故障，让守护进程在重开前执行端口复位。 */
+			state->transport_failed = true;
 			fprintf(stderr,
 				"actions-micro: hid write failed endpoint=0x%02x fd=%d "
 				"errno=%d (%s)\n",
@@ -715,6 +952,14 @@ static void configure_heartbeat_schedule(struct actions_context *state,
 		first_offset_us = state->heartbeat_period_us;
 	}
 	state->next_heartbeat_ns = now_ns + first_offset_us * 1000ULL;
+	/* 看门狗超时取心跳周期的三倍，观测窗口不低于五秒。 */
+	state->input_timeout_ns = state->heartbeat_period_us * 1000ULL *
+				  MISSED_HEARTBEAT_LIMIT;
+	if (state->input_timeout_ns < MIN_SESSION_INPUT_TIMEOUT_NS) {
+		state->input_timeout_ns = MIN_SESSION_INPUT_TIMEOUT_NS;
+	}
+	state->last_input_ns = now_ns;
+	state->last_heartbeat_sent_ns = 0;
 }
 
 static int send_due_heartbeats(struct actions_context *state, uint64_t now_ns)
@@ -738,12 +983,24 @@ static int send_due_heartbeats(struct actions_context *state, uint64_t now_ns)
 		write_le32(report + 4, sequence);
 		result = send_report(state, endpoint, report);
 		if (result == 0) {
+			/* 成功心跳记下发送时刻，其后一次 HID 输入证明会话仍存活。 */
+			state->last_heartbeat_sent_ns = now_ns;
 			state->next_command_endpoint =
 				endpoint == 0x04 ? 0x03 : 0x04;
-			fprintf(stderr,
-				"actions-micro: heartbeat send success endpoint=0x%02x "
-				"sequence=%u index=%zu\n",
-				endpoint, sequence, state->heartbeat_index);
+			/*
+			 * Log the first heartbeat and then one per minute;
+			 * per-second success lines flood field journals.
+			 */
+			if (state->heartbeat_success_count %
+			    HEARTBEAT_LOG_INTERVAL == 0U) {
+				fprintf(stderr,
+					"actions-micro: heartbeat ok endpoint=0x%02x "
+					"sequence=%u sent=%llu input-reports=%llu\n",
+					endpoint, sequence,
+					(unsigned long long)state->heartbeat_success_count,
+					(unsigned long long)state->input_reports);
+			}
+			++state->heartbeat_success_count;
 		} else {
 			fprintf(stderr,
 				"actions-micro: heartbeat send failed endpoint=0x%02x "
@@ -769,6 +1026,110 @@ static int send_due_heartbeats(struct actions_context *state, uint64_t now_ns)
 	    now_ns >= state->next_heartbeat_ns) {
 		state->next_heartbeat_ns =
 			now_ns + state->heartbeat_period_us * 1000ULL;
+	}
+
+	return result;
+}
+
+/* tick 轮询两个输入接口并排空缓存，避免固件状态报告在环形缓冲区积压。 */
+static int poll_hid_inputs(struct actions_context *state, uint64_t now_ns)
+{
+	struct pollfd descriptors[2];
+	unsigned char report[HID_REPORT_LENGTH];
+	ssize_t bytes_read;
+	int poll_result;
+	int index;
+	unsigned int reads = 0;
+	bool drained = false;
+	int result = 0;
+
+	/*
+	 * The hidraw descriptors stay in blocking mode, so every read must be
+	 * preceded by a zero-timeout poll that reports POLLIN. Draining more
+	 * than one report per tick keeps the 64-entry hidraw ring from
+	 * overwriting unread reports between ticks.
+	 */
+	while (result == 0 && !drained && reads < MAX_INPUT_READS_PER_TICK) {
+		descriptors[0].fd = state->hid[0];
+		descriptors[0].events = POLLIN;
+		descriptors[0].revents = 0;
+		descriptors[1].fd = state->hid[1];
+		descriptors[1].events = POLLIN;
+		descriptors[1].revents = 0;
+		poll_result = poll(descriptors, 2, 0);
+		if (poll_result < 0 && errno == EINTR) {
+			break;
+		}
+		if (poll_result < 0) {
+			result = -errno;
+			state->transport_failed = true;
+			break;
+		}
+		if (poll_result == 0) {
+			break;
+		}
+		drained = true;
+		for (index = 0; index < 2 && result == 0; ++index) {
+			if ((descriptors[index].revents &
+			     (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+				result = -ENODEV;
+				state->transport_failed = true;
+			} else if ((descriptors[index].revents & POLLIN) != 0) {
+				bytes_read = read(descriptors[index].fd, report,
+						  sizeof(report));
+				if (bytes_read > 0) {
+					state->last_input_ns = now_ns;
+					++state->input_reports;
+					++reads;
+					drained = false;
+				} else if (bytes_read == 0) {
+					result = -EIO;
+					state->transport_failed = true;
+				} else if (errno != EINTR && errno != EAGAIN) {
+					result = -errno;
+					state->transport_failed = true;
+				}
+			}
+		}
+	}
+	if (result != 0) {
+		fprintf(stderr, "actions-micro: HID input poll failed: %s\n",
+			strerror(-result));
+	}
+
+	return result;
+}
+
+/* 已发送心跳且长时间没有任何输入时，才判定固件会话丢失。 */
+static int check_session_watchdog(struct actions_context *state,
+				  uint64_t now_ns)
+{
+	uint64_t no_input_ns = 0;
+	uint64_t heartbeat_age_ns = 0;
+	int result = 0;
+
+	if (now_ns >= state->last_input_ns) {
+		no_input_ns = now_ns - state->last_input_ns;
+	}
+	if (now_ns >= state->last_heartbeat_sent_ns) {
+		heartbeat_age_ns = now_ns - state->last_heartbeat_sent_ns;
+	}
+	/*
+	 * Arm the watchdog only after this session has proven the device
+	 * emits input reports. A device that never talks back must not be
+	 * reset in a loop; it simply falls back to write-error detection.
+	 */
+	if (state->input_reports > 0 &&
+	    state->last_heartbeat_sent_ns > state->last_input_ns &&
+	    no_input_ns >= state->input_timeout_ns) {
+		state->transport_failed = true;
+		result = -ETIMEDOUT;
+		fprintf(stderr,
+			"actions-micro: session watchdog expired no-input-ms=%llu "
+			"heartbeat-age-ms=%llu input-reports=%llu\n",
+			(unsigned long long)(no_input_ns / 1000000ULL),
+			(unsigned long long)(heartbeat_age_ns / 1000000ULL),
+			(unsigned long long)state->input_reports);
 	}
 
 	return result;
@@ -1262,6 +1623,10 @@ static int actions_submit(void *context,
 	}
 	free(video.data);
 	free(configuration.data);
+	/* HID 会话故障先复位 USB 端口，再把原始错误交给守护进程进入重开流程。 */
+	if (result != 0 && state->transport_failed) {
+		result = recover_failed_transport(state, result);
+	}
 	if (result != 0) {
 		fprintf(stderr, "actions-micro: frame submission failed: %s\n",
 			strerror(-result));
@@ -1273,12 +1638,24 @@ static int actions_submit(void *context,
 static int actions_tick(void *context, uint64_t now_ns)
 {
 	struct actions_context *state = context;
+	int result = 0;
 
 	if (now_ns == 0) {
 		now_ns = monotonic_nanoseconds();
 	}
+	/* 每个 tick 先排空设备输入，再发送心跳并检查输入响应窗口。 */
+	result = poll_hid_inputs(state, now_ns);
+	if (result == 0) {
+		result = send_due_heartbeats(state, now_ns);
+	}
+	if (result == 0) {
+		result = check_session_watchdog(state, now_ns);
+	}
+	if (result != 0 && state->transport_failed) {
+		result = recover_failed_transport(state, result);
+	}
 
-	return send_due_heartbeats(state, now_ns);
+	return result;
 }
 
 static void actions_close(void *context)
@@ -1287,17 +1664,16 @@ static void actions_close(void *context)
 
 	if (state != NULL) {
 		stop_encoder(&state->encoder);
-		if (state->hid[1] >= 0) {
-			close(state->hid[1]);
-		}
-		if (state->hid[0] >= 0) {
-			close(state->hid[0]);
-		}
-		if (state->frames != 0 || state->reports != 0) {
+		/* close 统一释放可能已被看门狗置为 -1 的两个 HID 描述符。 */
+		close_hidraw_descriptors(state);
+		if (state->frames != 0 || state->reports != 0 ||
+		    state->input_reports != 0) {
 			fprintf(stderr,
-				"actions-micro: closed frames=%llu reports=%llu\n",
+				"actions-micro: closed frames=%llu reports=%llu "
+				"input-reports=%llu\n",
 				(unsigned long long)state->frames,
-				(unsigned long long)state->reports);
+				(unsigned long long)state->reports,
+				(unsigned long long)state->input_reports);
 		}
 		free(state->encoder.encoded);
 		free(state->encoder.packed_frame);

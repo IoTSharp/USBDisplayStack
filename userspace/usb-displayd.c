@@ -22,6 +22,7 @@
 #define BACKEND_TICK_INTERVAL_MS 100
 #define DEFAULT_BACKEND_RETRY_MS 2000U
 #define DEFAULT_READY_FILE "/run/usbdisplay/ready"
+#define IDLE_FRAME_REFRESH_NS 2000000000ULL
 
 static volatile sig_atomic_t stop_requested;
 
@@ -99,7 +100,7 @@ static int parse_arguments(int argc, char **argv, const char **device_path,
 	return result;
 }
 
-/* ç‰©ç†åç«¯æ–­å¼€æ—¶ä¿æŒä¸€ä¸ªè¿›ç¨‹ç­‰å¾…ï¼Œé¿å… systemd æ¯ä¸¤ç§’é‡å¤åˆ›å»ºå®ˆæŠ¤è¿›ç¨‹ã€‚ */
+/* ÎïÀíºó¶Ë¶Ï¿ªÊ±±£³ÖÒ»¸ö½ø³ÌµÈ´ı£¬±ÜÃâ systemd Ã¿Á½ÃëÖØ¸´´´½¨ÊØ»¤½ø³Ì¡£ */
 static int sleep_milliseconds(unsigned int milliseconds)
 {
 	struct timespec delay;
@@ -140,9 +141,9 @@ static int write_all(int descriptor, const char *buffer, size_t length)
 	return result;
 }
 
-/* å°±ç»ªæ–‡ä»¶åŒæ—¶æºå¸¦å®ˆæŠ¤è¿›ç¨‹ PIDï¼Œå‰¯å±è¿›ç¨‹å¯ä»¥æ‹’ç»é™ˆæ—§æ ‡è®°ã€‚ */
+/* ¾ÍĞ÷ÎÄ¼şÍ¬Ê±Ğ¯´ø PID ºÍ´«Êä´úÊı£¬¸±ÆÁ¿ÉÊ¶±ğ¿ìËÙÖØÁ¬²¢¾Ü¾ø³Â¾É±ê¼Ç¡£ */
 static int publish_ready_file(const char *ready_file, const char *backend_name,
-			      bool physical)
+			      bool physical, unsigned long long generation)
 {
 	char contents[256];
 	char temporary_file[320];
@@ -167,8 +168,10 @@ static int publish_ready_file(const char *ready_file, const char *backend_name,
 		}
 		if (result == 0) {
 			length = snprintf(contents, sizeof(contents),
-					"pid=%ld\nbackend=%s\nphysical=%u\n",
-					(long)getpid(), backend_name != NULL ? backend_name : "unknown",
+					"pid=%ld\ngeneration=%llu\nbackend=%s\n"
+					"physical=%u\n",
+					(long)getpid(), generation,
+					backend_name != NULL ? backend_name : "unknown",
 					physical ? 1U : 0U);
 			if (length < 0 || (size_t)length >= sizeof(contents)) {
 				result = -EOVERFLOW;
@@ -195,6 +198,50 @@ static void remove_ready_file(const char *ready_file)
 	if (ready_file != NULL && ready_file[0] != '\0') {
 		(void)unlink(ready_file);
 	}
+}
+
+/* ºó¶ËÖØ¿ªºóÏÈÊÍ·Å¾É mmap ÔÙ close/open Ö¡Á÷£¬±ÜÃâÓ³ÉäÒıÓÃÊ¹ÄÚºË·µ»Ø EBUSY¡£ */
+static int reopen_frame_stream(const char *device_path, size_t map_bytes,
+			       int *device_fd, void **mapping)
+{
+	int descriptor = -1;
+	void *new_mapping = MAP_FAILED;
+	int result = 0;
+
+	if (*mapping != MAP_FAILED) {
+		if (munmap(*mapping, map_bytes) != 0) {
+			result = -errno;
+		} else {
+			*mapping = MAP_FAILED;
+		}
+	}
+	if (result == 0 && *device_fd >= 0) {
+		(void)close(*device_fd);
+		*device_fd = -1;
+	}
+	if (result == 0) {
+		descriptor = open(device_path, O_RDONLY | O_CLOEXEC);
+		if (descriptor < 0) {
+			result = -errno;
+		}
+	}
+	if (result == 0) {
+		new_mapping = mmap(NULL, map_bytes, PROT_READ, MAP_SHARED,
+				   descriptor, 0);
+		if (new_mapping == MAP_FAILED) {
+			result = -errno;
+		}
+	}
+	if (result == 0) {
+		*device_fd = descriptor;
+		*mapping = new_mapping;
+		descriptor = -1;
+	}
+	if (descriptor >= 0) {
+		(void)close(descriptor);
+	}
+
+	return result;
 }
 
 static int validate_update(const struct usbdisplay_device_info *info,
@@ -229,6 +276,9 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 	struct usbdisplay_frame frame;
 	ssize_t bytes_read;
 	int poll_result;
+	uint64_t now_ns = 0;
+	uint64_t last_submit_ns = 0;
+	bool frame_valid = false;
 	int result = 0;
 
 	descriptor.fd = device_fd;
@@ -268,18 +318,34 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 					frame.damage_width = update.damage_width;
 					frame.damage_height = update.damage_height;
 					result = backend->submit(backend_context, &frame);
+					if (result == 0) {
+						frame_valid = true;
+						last_submit_ns = monotonic_nanoseconds();
+					}
 				}
 			}
 		} else if (poll_result > 0 &&
 			   (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
 			result = -EIO;
 		}
+		now_ns = monotonic_nanoseconds();
+		/* ¾²Ö¹½çÃæÒ²Ã¿Á½ÃëÖØ½»×îĞÂÖ¡£¬±ÜÃâ¹Ì¼şÒò³¤ÆÚÎŞÊÓÆµÍË»ØµÈ´ıÒ³¡£ */
+		if (result == 0 && frame_valid &&
+		    (backend->capabilities & USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0 &&
+		    now_ns >= last_submit_ns &&
+		    now_ns - last_submit_ns >= IDLE_FRAME_REFRESH_NS) {
+			result = backend->submit(backend_context, &frame);
+			if (result == 0) {
+				last_submit_ns = monotonic_nanoseconds();
+			}
+		}
 		if (result == 0 &&
 		    (backend->capabilities & USBDISPLAY_BACKEND_CAP_TICK) != 0 &&
 		    backend->struct_size >= USBDISPLAY_BACKEND_V1_TICK_SIZE &&
 		    backend->tick != NULL) {
-			result = backend->tick(backend_context,
-					       monotonic_nanoseconds());
+			/* submit ¿ÉÄÜ·¢ËÍĞÄÌø£¬tick ±ØĞëÊ¹ÓÃÌá½»Íê³ÉºóµÄÊ±¼ä¼ÇÂ¼Éè±¸ÏìÓ¦¡£ */
+			now_ns = monotonic_nanoseconds();
+			result = backend->tick(backend_context, now_ns);
 		}
 	}
 
@@ -304,9 +370,11 @@ int main(int argc, char **argv)
 	int result;
 	int open_result;
 	int loop_result;
+	const char *open_stage = "backend";
 	unsigned int retry_count = 0U;
 	unsigned long long reopen_count = 0ULL;
-	/* Count only completed opens after run_loop reported a transport loss. */
+	unsigned long long generation = 1ULL;
+	/* ½öÍ³¼Æ run_loop ±¨¸æ´«Êä¶ªÊ§Ö®ºóÍêÕû³É¹¦µÄÖØ¿ª¡£ */
 	bool reopen_pending = false;
 
 	result = parse_arguments(argc, argv, &device_path, &backend_path,
@@ -384,21 +452,40 @@ int main(int argc, char **argv)
 			backend->name, retry_ms);
 		while (result == 0 && !stop_requested) {
 			backend_context = NULL;
+			open_stage = "backend";
 			open_result = backend->open(&backend_config, &backend_context);
+			/* ºó¶ËÖØ¿ªÍê³ÉºóÔÙÖØ¿ªÖ¡Á÷£¬Ê¹Ê×¸ö poll Á¢¼´ÊÕµ½ÄÚºË±£ÁôµÄ×îĞÂÖ¡¡£ */
+			if (open_result == 0 && reopen_pending) {
+				open_stage = "frame stream";
+				open_result = reopen_frame_stream(device_path,
+							  info.map_bytes, &device_fd,
+							  &mapping);
+			}
 			if (open_result != 0) {
 				if (retry_count == 0U || retry_count % 5U == 0U) {
 					fprintf(stderr,
-						"usb-displayd: backend unavailable: %s "
+						"usb-displayd: %s unavailable: %s "
 						"reopen_count=%llu\n",
-						strerror(-open_result), reopen_count);
+						open_stage, strerror(-open_result),
+						reopen_count);
+				}
+				if (backend_context != NULL) {
+					backend->close(backend_context);
+					backend_context = NULL;
 				}
 				retry_count += 1U;
 				result = sleep_milliseconds(retry_ms);
 			} else {
 				retry_count = 0U;
+				if (reopen_pending) {
+					++reopen_count;
+					reopen_pending = false;
+				}
+				generation = reopen_count + 1ULL;
 				result = publish_ready_file(ready_file, backend->name,
 						(backend->capabilities &
-						 USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0);
+						 USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0,
+						generation);
 				if (result != 0) {
 					fprintf(stderr,
 						"usb-displayd: cannot publish readiness: %s\n",
@@ -406,17 +493,13 @@ int main(int argc, char **argv)
 					backend->close(backend_context);
 					backend_context = NULL;
 				} else {
-					if (reopen_pending) {
-						++reopen_count;
-						reopen_pending = false;
-					}
 					fprintf(stderr,
 						"usb-displayd: %s -> %s (%ux%u) ready\n",
 						device_path, backend->name, info.width, info.height);
 					fprintf(stderr,
 						"usb-displayd: transport open generation=%llu "
 						"reopen_count=%llu\n",
-						reopen_count + 1ULL, reopen_count);
+						generation, reopen_count);
 					loop_result = run_loop(device_fd, &info, mapping, backend,
 						backend_context);
 					remove_ready_file(ready_file);

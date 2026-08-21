@@ -114,12 +114,13 @@ Do not assume the secondary nodes are always numbered `1`; discover them by
 the `usbdisplay` framebuffer name and DRM driver name in production scripts.
 
 The daemon writes `/run/usbdisplay/ready` after the selected backend has opened
-successfully. The marker contains `pid`, `backend`, and `physical`; only
-`physical=1` is a valid gate for a real HDMI consumer. The null and PPM
-diagnostic backends intentionally publish `physical=0`. The daemon removes the
-marker on disconnect and waits inside the same process for reconnect. The
-virtual framebuffer can exist without a USB adapter. `--ready-file PATH` and
-`--retry-ms N` customize the marker and retry interval.
+successfully. The marker contains `pid`, `generation`, `backend`, and
+`physical`; consumers require a positive generation and `physical=1` for a real
+HDMI transport. The null and PPM diagnostic backends intentionally publish
+`physical=0`. The daemon removes the marker on disconnect, increments the
+generation after recovery, and waits inside the same process for reconnect.
+The virtual framebuffer can exist without a USB adapter. `--ready-file PATH`
+and `--retry-ms N` customize the marker and retry interval.
 
 ## Application examples
 

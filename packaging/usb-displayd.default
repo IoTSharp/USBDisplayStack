@@ -9,7 +9,9 @@ USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-null.so
 # USBDISPLAY_BACKEND_ARGS=--backend-option /tmp/usbdisplay.ppm
 
 # Actions Micro 185b:2d1d (requires ffmpeg with libx264 and an authorized
-# replay template containing initialization and heartbeat commands):
+# replay template containing initialization and heartbeat commands).
+# bootstrap=full is required for the reopen path to reactivate the firmware
+# after a USB reset; without it only the initialization subset is replayed:
 # USBDISPLAY_BACKEND=/usr/lib/usbdisplay/usbdisplay-actions-micro.so
-# USBDISPLAY_BACKEND_ARGS=--backend-option template=/var/lib/usbdisplay/actions-micro.replay
+# USBDISPLAY_BACKEND_ARGS=--backend-option template=/var/lib/usbdisplay/actions-micro.replay,bootstrap=full
 USBDISPLAY_BACKEND_ARGS=

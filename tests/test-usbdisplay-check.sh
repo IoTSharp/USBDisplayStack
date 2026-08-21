@@ -49,6 +49,7 @@ printf '%s\n' usbdisplay > "$test_root/sys/class/graphics/fb1/name"
 printf '%s\n' usb-displayd > "$test_root/proc/321/comm"
 cat > "$test_root/run/ready" <<'EOF'
 pid=321
+generation=1
 backend=null
 physical=0
 EOF
@@ -58,6 +59,7 @@ expect_status 0 --allow-diagnostic
 
 cat > "$test_root/run/ready" <<'EOF'
 pid=321
+generation=1
 backend=actions-micro
 physical=1
 EOF
@@ -71,9 +73,11 @@ expect_status 0
 json_result=$(run_check --json)
 printf '%s\n' "$json_result" | grep -q '"status":"physical-ready"'
 printf '%s\n' "$json_result" | grep -q '"usb_device":"1-2"'
+printf '%s\n' "$json_result" | grep -q '"generation":"1"'
 
 cat > "$test_root/run/ready" <<'EOF'
 pid=321
+generation=1
 backend=invalid backend
 physical=1
 EOF
@@ -81,10 +85,19 @@ expect_status 1
 
 cat > "$test_root/run/ready" <<'EOF'
 pid=321
+generation=1
 backend=actions-micro
 physical=1
 EOF
 printf '%s\n' unrelated-process > "$test_root/proc/321/comm"
+expect_status 1
+
+printf '%s\n' usb-displayd > "$test_root/proc/321/comm"
+cat > "$test_root/run/ready" <<'EOF'
+pid=321
+backend=actions-micro
+physical=1
+EOF
 expect_status 1
 
 printf '%s\n' 'usbdisplay-check tests passed'

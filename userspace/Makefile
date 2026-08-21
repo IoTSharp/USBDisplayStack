@@ -4,7 +4,8 @@ CC ?= cc
 BUILD_DIR ?= $(abspath ../build)
 CPPFLAGS += -I../include
 CFLAGS ?= -O2 -g
-CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC
+# 本目录 C 源码按仓库约定使用 GBK/CP936，显式声明输入字符集避免构建机区域设置漂移。
+CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC -finput-charset=GBK
 LDLIBS += -ldl -lrt
 
 DAEMON := $(BUILD_DIR)/usb-displayd

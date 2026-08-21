@@ -148,6 +148,7 @@ collect_status()
 	daemon_alive=false
 	backend=
 	daemon_pid=
+	generation=
 	physical_value=
 	service_state=unavailable
 	ready=false
@@ -199,6 +200,7 @@ collect_status()
 		while IFS='=' read -r marker_key marker_value; do
 			case "$marker_key" in
 				pid) daemon_pid=$marker_value ;;
+				generation) generation=$marker_value ;;
 				backend) backend=$marker_value ;;
 				physical) physical_value=$marker_value ;;
 			esac
@@ -209,6 +211,7 @@ collect_status()
 			*) backend_valid=true ;;
 		esac
 		if is_unsigned_integer "$daemon_pid" && [ "$daemon_pid" -gt 0 ] &&
+		   is_unsigned_integer "$generation" && [ "$generation" -gt 0 ] &&
 		   $backend_valid &&
 		   { [ "$physical_value" = 0 ] || [ "$physical_value" = 1 ]; }; then
 			marker_valid=true
@@ -283,6 +286,7 @@ if ! $quiet; then
 		printf ',"marker_valid":%s' "$marker_valid"
 		printf ',"daemon_pid":"%s"' "$(json_escape "$daemon_pid")"
 		printf ',"daemon_alive":%s' "$daemon_alive"
+		printf ',"generation":"%s"' "$(json_escape "$generation")"
 		printf ',"backend":"%s"' "$(json_escape "$backend")"
 		if [ "$physical_value" = 1 ]; then
 			printf ',"physical":true'
@@ -300,6 +304,7 @@ if ! $quiet; then
 		printf '  framebuffer:%s\n' " ${framebuffer_device:-missing}"
 		printf '  daemon:     pid=%s alive=%s service=%s\n' \
 			"${daemon_pid:-missing}" "$daemon_alive" "$service_state"
+		printf '  generation: %s\n' "${generation:-missing}"
 		printf '  backend:    %s physical=%s\n' \
 			"${backend:-missing}" "${physical_value:-unknown}"
 		printf '  adapter:    %s:%s %s\n' "$expected_vid" "$expected_pid" \
