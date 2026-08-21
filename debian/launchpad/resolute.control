@@ -1,0 +1,30 @@
+Source: usbdisplay-stack
+Section: kernel
+Priority: optional
+Maintainer: Yanhong Ma <mysticboy@live.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ linux-headers-generic,
+ linux-libc-dev
+Standards-Version: 4.7.2
+Homepage: https://github.com/IoTSharp/USBDisplayStack
+Vcs-Browser: https://github.com/IoTSharp/USBDisplayStack
+Vcs-Git: https://github.com/IoTSharp/USBDisplayStack.git
+Rules-Requires-Root: no
+
+Package: usbdisplay-stack
+Architecture: amd64
+Depends:
+ ffmpeg,
+ kmod,
+ systemd,
+ udev,
+ ${misc:Depends},
+ ${shlibs:Depends}
+XB-X-USBDisplay-Kernel: ${kernel:Release}
+Description: USB display virtual DRM/fbdev stack
+ Kernel module, frame transport daemon, Actions Micro USB-HDMI backend,
+ diagnostic tools, installation scripts, and a physical-readiness checker.
+ .
+ This build is tied to the kernel ABI recorded in X-USBDisplay-Kernel.
+ Installation does not load the module or enable the service automatically.

@@ -12,7 +12,7 @@ bind mount 到容器中：
 
 ```powershell
 pwsh ./scripts/build-pcct-deb.ps1 \
-  -Version 0.2.3 \
+  -Version 0.2.4 \
   -KernelModule D:\path\to\usbdisplay.ko \
   -KernelRelease 4.15.0-60-generic \
   -Architecture i386
@@ -25,10 +25,10 @@ pwsh ./scripts/build-pcct-deb.ps1 \
 如果已经位于合适的 Linux/PCCT 容器内，也可以直接执行：
 
 ```bash
-make userspace USBDISPLAY_VERSION=0.2.3
+make userspace USBDISPLAY_VERSION=0.2.4
 KERNEL_MODULE=/path/to/usbdisplay.ko \
 KERNEL_RELEASE=4.15.0-60-generic DEB_ARCH=i386 \
-  sh scripts/package-deb.sh 0.2.3 dist
+  sh scripts/package-deb.sh 0.2.4 dist
 ```
 
 `build-pcct-deb.ps1` 会把同一个 `-Version` 值注入 `usb-displayd` 内置 Splash，
@@ -51,7 +51,7 @@ systemd 配置、`usbdisplay-check`，以及项目的全部安装/卸载脚本�
 目标机能够访问正确的 APT 软件源时，用户只需下载一个 `.deb`：
 
 ```bash
-sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+sudo apt install ./usbdisplay-stack_0.2.4+kernel.4.15.0-60-generic_i386.deb
 ```
 
 APT 会安装 `ffmpeg`、`systemd`、`udev`、`kmod` 及其动态库依赖，再执行 DEB
@@ -66,7 +66,7 @@ APT 会安装 `ffmpeg`、`systemd`、`udev`、`kmod` 及其动态库依赖，再
 
 ```bash
 sudo sh ./install-usbdisplay-offline.sh \
-  ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+  ./usbdisplay-stack_0.2.4+kernel.4.15.0-60-generic_i386.deb
 ```
 
 离线脚本不会联网补依赖。若确实无法提供校验文件，可以显式使用
@@ -85,7 +85,7 @@ sudo sh ./install-usbdisplay-offline.sh \
   --bootstrap full \
   --width 1920 --height 1080 \
   --enable \
-  ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+  ./usbdisplay-stack_0.2.4+kernel.4.15.0-60-generic_i386.deb
 ```
 
 安装脚本把 replay 以 `0600` 权限放到

@@ -49,14 +49,18 @@ jobs:
             docker rm -f "$container_name" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT HUP INT TERM
-          docker create --name "$container_name" ubuntu:18.04 sh -lc '
+          docker create --platform linux/386 --name "$container_name" \
+            ubuntu:18.04 sh -lc '
             set -eu
             export DEBIAN_FRONTEND=noninteractive
             apt-get -o Acquire::Retries=5 update
-            apt-get -o Acquire::Retries=5 install -y --no-install-recommends build-essential linux-headers-4.15.0-60-generic
+            apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+              build-essential file linux-headers-4.15.0-60-generic
             cd /src
             make module KDIR=/lib/modules/4.15.0-60-generic/build
             strings kernel/usbdisplay.ko | grep -q "^vermagic=4.15.0-60-generic "
+            file kernel/usbdisplay.ko |
+              grep -Eq "ELF 32-bit.*Intel (80386|i386)"
           ' >/dev/null
           docker cp ./. "$container_name:/src"
           docker start --attach "$container_name"
@@ -144,6 +148,8 @@ jobs:
 
       - name: Verify Debian metadata and checksum
         shell: bash
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           package=$(find dist-pcct -maxdepth 1 -type f -name '*.deb' -print -quit)
@@ -160,6 +166,16 @@ jobs:
             "$package_contents"
           grep -q './usr/share/doc/usbdisplay-stack/docs/assets/usbdisplay-splash.png' \
             "$package_contents"
+          extracted="$RUNNER_TEMP/usbdisplay-package-root"
+          dpkg-deb -x "$package" "$extracted"
+          test "$(cat "$extracted/usr/share/usbdisplay/VERSION")" = \
+            "$EXPECTED_VERSION"
+          strings "$extracted/usr/bin/usb-displayd" |
+            grep -Fqx "VERSION $EXPECTED_VERSION"
+          file "$extracted/lib/modules/$KERNEL_RELEASE/extra/usbdisplay.ko" |
+            grep -Eq 'ELF 32-bit.*Intel (80386|i386)'
+          file "$extracted/usr/bin/usb-displayd" |
+            grep -Eq 'ELF 32-bit.*Intel (80386|i386)'
           (cd dist-pcct && sha256sum -c "$(basename "$package").sha256")
 
       - name: Upload Debian package
@@ -214,3 +230,155 @@ jobs:
               --generate-notes
           fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+
+  publish-launchpad:
+    name: publish ${{ matrix.series }} ${{ matrix.architecture }} to Launchpad
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    needs: debian-package
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - series: bionic
+            architecture: i386
+          - series: resolute
+            architecture: amd64
+    permissions:
+      contents: read
+    env:
+      DEBFULLNAME: Yanhong Ma
+      DEBEMAIL: mysticboy@live.com
+      PPA_TARGET: ppa:maikebing/usbdisplaystack
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      UBUNTU_SERIES: ${{ matrix.series }}
+      PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          path: source
+
+      - name: Install source-package tools
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debhelper devscripts dput gnupg
+
+      - name: Assemble unsigned Debian source package
+        id: source-package
+        shell: bash
+        run: |
+          set -eu
+          case "$RELEASE_TAG" in
+            v[0-9]*) ;;
+            *)
+              printf 'Invalid release tag: %s\n' "$RELEASE_TAG" >&2
+              exit 2
+              ;;
+          esac
+          upstream_version=${RELEASE_TAG#v}
+          case "$upstream_version" in
+            ''|[!0-9]*|*[!0-9A-Za-z.+~-]*)
+              printf 'Invalid upstream version: %s\n' "$upstream_version" >&2
+              exit 2
+              ;;
+            *) ;;
+          esac
+          archive="$GITHUB_WORKSPACE/usbdisplay-stack_${upstream_version}.orig.tar.gz"
+
+          git -C source archive \
+            --format=tar.gz \
+            --prefix="usbdisplay-stack-${upstream_version}/" \
+            --output="$archive" \
+            HEAD
+          chmod 0755 source/debian/rules
+          if [ -f "source/debian/launchpad/${UBUNTU_SERIES}.control" ]; then
+            cp "source/debian/launchpad/${UBUNTU_SERIES}.control" \
+              source/debian/control
+          elif [ "$UBUNTU_SERIES" != bionic ]; then
+            printf 'Missing Debian control file for %s.\n' "$UBUNTU_SERIES" >&2
+            exit 2
+          fi
+          if grep -q '^[[:space:]]*debhelper-compat' source/debian/control; then
+            rm -f source/debian/compat
+          fi
+          rm -rf source/debian/launchpad
+
+          current_version=$(dpkg-parsechangelog -l source/debian/changelog \
+            -S Version)
+          package_version="${upstream_version}-1~${UBUNTU_SERIES}1"
+          if [ "$current_version" != "$package_version" ]; then
+            (
+              cd source
+              dch --force-distribution \
+                --newversion "$package_version" \
+                --distribution "$UBUNTU_SERIES" \
+                --urgency medium \
+                "Publish upstream release $upstream_version for Ubuntu $UBUNTU_SERIES $PACKAGE_ARCHITECTURE."
+            )
+          fi
+
+          (
+            cd source
+            # Launchpad, not this ubuntu-latest runner, resolves series-specific build dependencies.
+            dpkg-buildpackage -S -sa -us -uc -d
+          )
+          changes="$GITHUB_WORKSPACE/usbdisplay-stack_${package_version}_source.changes"
+          test -f "$changes"
+          printf 'changes=%s\n' "$changes" >> "$GITHUB_OUTPUT"
+          printf 'package-version=%s\n' "$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Import Launchpad signing key
+        shell: bash
+        env:
+          LAUNCHPAD_GPG_FINGERPRINT: ${{ secrets.LAUNCHPAD_GPG_FINGERPRINT }}
+          LAUNCHPAD_GPG_PRIVATE_KEY: ${{ secrets.LAUNCHPAD_GPG_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "$LAUNCHPAD_GPG_FINGERPRINT" ] ||
+             [ -z "$LAUNCHPAD_GPG_PRIVATE_KEY" ]; then
+            printf '%s\n' \
+              'LAUNCHPAD_GPG_FINGERPRINT and LAUNCHPAD_GPG_PRIVATE_KEY are required.' >&2
+            exit 2
+          fi
+          expected_fingerprint=$(printf '%s' "$LAUNCHPAD_GPG_FINGERPRINT" |
+            tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+          printf '%s\n' "$LAUNCHPAD_GPG_PRIVATE_KEY" | gpg --batch --import
+          actual_fingerprint=$(gpg --batch --with-colons --fingerprint \
+            "$expected_fingerprint" | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+          if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then
+            printf '%s\n' 'Imported signing key does not match the configured fingerprint.' >&2
+            exit 2
+          fi
+
+      - name: Sign and upload source package
+        shell: bash
+        env:
+          CHANGES_FILE: ${{ steps.source-package.outputs.changes }}
+          LAUNCHPAD_GPG_FINGERPRINT: ${{ secrets.LAUNCHPAD_GPG_FINGERPRINT }}
+        run: |
+          set -eu
+          fingerprint=$(printf '%s' "$LAUNCHPAD_GPG_FINGERPRINT" |
+            tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+          debsign -k"$fingerprint" "$CHANGES_FILE"
+          dput "$PPA_TARGET" "$CHANGES_FILE"
+
+      - name: Preserve signed source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbdisplay-stack-launchpad-source-${{ steps.source-package.outputs.package-version }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            usbdisplay-stack_*.dsc
+            usbdisplay-stack_*.orig.tar.*
+            usbdisplay-stack_*.debian.tar.*
+            usbdisplay-stack_*_source.buildinfo
+            usbdisplay-stack_*_source.changes

@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -e
+
+package_kernel='@KERNEL_RELEASE@'
+running_kernel=$(uname -r)
+
+case "${1:-}" in
+	install|upgrade)
+		if [ "$running_kernel" != "$package_kernel" ]; then
+			printf 'usbdisplay-stack: package kernel %s does not match running kernel %s.\n' \
+				"$package_kernel" "$running_kernel" >&2
+			exit 1
+		fi
+		;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -8,8 +8,9 @@ normal framebuffer or DRM/KMS devices; protocol, compression, and USB details
 stay in replaceable userspace backends.
 
 > **Alpha status:** the virtual DRM/fbdev frontend and userspace frame path are
-> working on Linux 4.15. The Actions Micro `185b:2d1d` live backend is
-> implemented but remains experimental and is not enabled by default.
+> working on Linux 4.15. The module also compiles against Ubuntu 26.04's Linux
+> 7.0 DRM APIs, with runtime validation still pending. The Actions Micro
+> `185b:2d1d` live backend remains experimental and is not enabled by default.
 
 ## Quick install
 
@@ -207,7 +208,7 @@ the package in the PCCT image without bind-mounting the source tree:
 
 ```powershell
 pwsh ./scripts/build-pcct-deb.ps1 \
-  -Version 0.2.3 \
+  -Version 0.2.4 \
   -KernelModule /path/to/usbdisplay.ko
 ```
 
@@ -219,6 +220,11 @@ provide a native Debian/APT package registry. The manual workflow dispatch can
 override the artifact version without publishing.
 Maintainers can instead set `release_tag` to an existing `vX.Y.Z` tag to rebuild
 that tag and recover its Release assets.
+
+Tagged builds can also publish signed Debian source packages to the
+`ppa:maikebing/usbdisplaystack` Launchpad PPA. The one-time PPA and GitHub
+Actions signing-key setup is documented in the
+[Launchpad PPA publishing guide](docs/launchpad-ppa.zh-CN.md).
 
 The package contains its Debian lifecycle hooks and all project installation
 scripts. It deliberately does not activate the module or select the physical

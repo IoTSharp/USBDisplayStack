@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.2.4 - 2026-08-22
+
+- Add signed Launchpad source-package publication for Ubuntu 18.04 i386 and
+  Ubuntu 26.04 amd64 tag builds.
+- Keep the Linux 4.15 TinyDRM path and add a modern DRM/GEM DMA path that
+  compiles against Ubuntu 26.04's `7.0.0-30-generic` headers.
+
+## v0.2.3 - 2026-08-22
+
 - Publish tagged Debian artifacts to the matching GitHub Release.
 - Render a redesigned connection-status splash with the project URL, support
   QQ, and PCCT-injected package version while no fbdev or DRM producer is open,

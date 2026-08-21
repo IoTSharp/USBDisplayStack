@@ -1,0 +1,6 @@
+usbdisplay-stack (0.2.4-1~bionic1) bionic; urgency=medium
+
+  * Publish upstream release 0.2.4 for Ubuntu Bionic i386.
+  * Build the kernel module for Linux 4.15.0-60-generic.
+
+ -- Yanhong Ma <mysticboy@live.com>  Sat, 22 Aug 2026 00:00:00 +0800

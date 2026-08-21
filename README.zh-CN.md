@@ -6,9 +6,9 @@ USBDisplayStack 是一个采用 `GPL-2.0-only` 许可证的 Linux USB 显示栈�
 使用厂商私有传输协议的 USB 显示适配器。应用只需向标准 framebuffer 或
 DRM/KMS 设备渲染；协议、压缩和 USB 传输由可替换的用户态后端负责。
 
-> **Alpha 状态：**虚拟 DRM/fbdev 前端和用户态帧通路已在 Linux 4.15
-> 工作。Actions Micro `185b:2d1d` 实时后端已经实现，但仍处于实验阶段，
-> 默认不启用。
+> **Alpha 状态：**虚拟 DRM/fbdev 前端和用户态帧通路已在 Linux 4.15 工作；
+> 内核模块也已通过 Ubuntu 26.04 Linux 7.0 DRM API 编译验证，但尚未完成该系统
+> 上的运行验证。Actions Micro `185b:2d1d` 实时后端仍处于实验阶段，默认不启用。
 
 ## 快速安装
 
@@ -184,7 +184,7 @@ sudo systemctl enable --now usb-displayd.service
 
 ```powershell
 pwsh ./scripts/build-pcct-deb.ps1 \
-  -Version 0.2.3 \
+  -Version 0.2.4 \
   -KernelModule /path/to/usbdisplay.ko
 ```
 
@@ -194,6 +194,11 @@ GitHub Actions 会在每次 push 和 pull request 时执行同一套 PCCT 打包
 GitHub Packages 不提供原生 Debian/APT 软件源类型，因此不用于发布 DEB。手动
 运行 workflow 时只填写版本号不会发布；维护者也可以把 `release_tag` 设为已有的
 `vX.Y.Z` 标签，从该标签重建并恢复对应的 Release 资产。
+
+标签构建还可以把签名后的 Debian 源码包自动发布到
+`ppa:maikebing/usbdisplaystack`。PPA 和 GitHub Actions 签名密钥的一次性配置、
+自动发布及 `v0.2.4` 发布步骤见
+[Launchpad PPA 发布说明](docs/launchpad-ppa.zh-CN.md)。
 
 DEB 已包含 Debian 生命周期脚本和项目的全部安装/卸载脚本。出于现场安全和
 replay 授权边界，安装后仍不会自动加载模块、选择实体后端或启动服务。离线安装、

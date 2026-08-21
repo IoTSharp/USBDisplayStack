@@ -39,7 +39,7 @@ set -eu
 cd /src
 rm -rf build dist
 make userspace USBDISPLAY_VERSION="$PACKAGE_VERSION"
-make check
+USBDISPLAY_EXPECTED_VERSION="$PACKAGE_VERSION" make check
 KERNEL_MODULE=/usbdisplay.ko \
 KERNEL_RELEASE="$PACKAGE_KERNEL" \
 DEB_ARCH="$PACKAGE_ARCH" \

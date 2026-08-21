@@ -1,4 +1,5 @@
 * text=auto eol=lf
+/debian export-ignore
 *.replay binary
 *.pcap binary
 *.h264 binary

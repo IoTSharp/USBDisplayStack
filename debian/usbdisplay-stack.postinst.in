@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -e
+
+kernel_release='@KERNEL_RELEASE@'
+
+if command -v depmod >/dev/null 2>&1; then
+	depmod -a "$kernel_release"
+fi
+if command -v systemctl >/dev/null 2>&1; then
+	systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+if command -v udevadm >/dev/null 2>&1; then
+	udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+if ! command -v ffmpeg >/dev/null 2>&1 ||
+   ! ffmpeg -hide_banner -encoders 2>/dev/null |
+	grep -q '[[:space:]]libx264[[:space:]]'; then
+	printf '%s\n' \
+		'usbdisplay-stack: ffmpeg with the libx264 encoder is required.' >&2
+	exit 1
+fi
+
+printf '%s\n' \
+	'usbdisplay-stack installed; module and service were not started automatically.'
+
+#DEBHELPER#
+
+exit 0

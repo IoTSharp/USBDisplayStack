@@ -1,0 +1,86 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/pkg-info.mk
+
+KERNEL_BUILD_DIR := $(shell find /usr/src -maxdepth 1 -type d \
+	-name 'linux-headers-*-generic' | sort -V | tail -n 1)
+KERNEL_RELEASE := $(patsubst linux-headers-%,%,$(notdir $(KERNEL_BUILD_DIR)))
+PACKAGE_DIR := debian/usbdisplay-stack
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	test -n "$(KERNEL_RELEASE)"
+	test -d "$(KERNEL_BUILD_DIR)"
+	$(MAKE) userspace USBDISPLAY_VERSION="$(DEB_VERSION_UPSTREAM)"
+	$(MAKE) module KDIR="$(KERNEL_BUILD_DIR)"
+
+override_dh_auto_test:
+	USBDISPLAY_EXPECTED_VERSION="$(DEB_VERSION_UPSTREAM)" $(MAKE) check
+
+override_dh_auto_install:
+	install -d \
+		$(PACKAGE_DIR)/etc/default \
+		$(PACKAGE_DIR)/etc/modprobe.d \
+		$(PACKAGE_DIR)/etc/modules-load.d \
+		$(PACKAGE_DIR)/etc/udev/rules.d \
+		$(PACKAGE_DIR)/lib/modules/$(KERNEL_RELEASE)/extra \
+		$(PACKAGE_DIR)/lib/systemd/system \
+		$(PACKAGE_DIR)/usr/bin \
+		$(PACKAGE_DIR)/usr/lib/usbdisplay \
+		$(PACKAGE_DIR)/usr/share/doc/usbdisplay-stack/docs/assets \
+		$(PACKAGE_DIR)/usr/share/usbdisplay/install-scripts \
+		$(PACKAGE_DIR)/var/lib/usbdisplay
+	install -m 0644 kernel/usbdisplay.ko \
+		$(PACKAGE_DIR)/lib/modules/$(KERNEL_RELEASE)/extra/usbdisplay.ko
+	install -m 0755 build/usb-displayd $(PACKAGE_DIR)/usr/bin/usb-displayd
+	install -m 0755 build/fb-test-pattern \
+		$(PACKAGE_DIR)/usr/bin/usbdisplay-fb-test-pattern
+	install -m 0755 build/drm-probe \
+		$(PACKAGE_DIR)/usr/bin/usbdisplay-drm-probe
+	install -m 0755 tools/usbdisplay-check \
+		$(PACKAGE_DIR)/usr/bin/usbdisplay-check
+	install -m 0755 build/usbdisplay-null.so build/usbdisplay-ppm.so \
+		build/usbdisplay-actions-micro.so $(PACKAGE_DIR)/usr/lib/usbdisplay/
+	install -m 0644 packaging/usb-displayd.default \
+		$(PACKAGE_DIR)/etc/default/usb-displayd
+	install -m 0644 packaging/usbdisplay.conf \
+		$(PACKAGE_DIR)/etc/modprobe.d/usbdisplay.conf
+	install -m 0644 packaging/usbdisplay.modules-load.conf \
+		$(PACKAGE_DIR)/etc/modules-load.d/usbdisplay.conf
+	install -m 0644 packaging/60-usbdisplay.rules \
+		$(PACKAGE_DIR)/etc/udev/rules.d/60-usbdisplay.rules
+	install -m 0644 packaging/usb-displayd.service \
+		$(PACKAGE_DIR)/lib/systemd/system/usb-displayd.service
+	install -m 0644 docs/assets/usbdisplay-splash.png \
+		$(PACKAGE_DIR)/usr/share/doc/usbdisplay-stack/docs/assets/
+	install -m 0755 scripts/install.sh scripts/install-prebuilt.sh \
+		scripts/install-offline-deb.sh scripts/uninstall.sh \
+		$(PACKAGE_DIR)/usr/share/usbdisplay/install-scripts/
+	printf '%s\n' "$(KERNEL_RELEASE)" > \
+		$(PACKAGE_DIR)/usr/share/usbdisplay/KERNEL_RELEASE
+	printf '%s\n' "$(DEB_VERSION_UPSTREAM)" > \
+		$(PACKAGE_DIR)/usr/share/usbdisplay/VERSION
+
+override_dh_auto_clean:
+	rm -rf build kernel/.tmp_versions
+	rm -f kernel/*.o kernel/*.ko kernel/*.mod kernel/*.mod.c \
+		kernel/.*.cmd kernel/Module.symvers kernel/modules.order
+	rm -f debian/usbdisplay-stack.preinst debian/usbdisplay-stack.postinst \
+		debian/usbdisplay-stack.postrm
+
+override_dh_installdeb:
+	for script in preinst postinst postrm; do \
+		sed 's/@KERNEL_RELEASE@/$(KERNEL_RELEASE)/g' \
+			debian/usbdisplay-stack.$$script.in > \
+			debian/usbdisplay-stack.$$script; \
+		chmod 0755 debian/usbdisplay-stack.$$script; \
+	done
+	dh_installdeb
+
+override_dh_gencontrol:
+	dh_gencontrol -- -Vkernel:Release="$(KERNEL_RELEASE)"
+
+override_dh_installchangelogs:
+	dh_installchangelogs CHANGELOG.md

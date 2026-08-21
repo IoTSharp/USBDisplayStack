@@ -2,10 +2,16 @@
 
 ## Linux kernel
 
-The first alpha is developed and tested against Ubuntu's
-`4.15.0-60-generic` x86 kernel. The current module uses the Linux 4.15
-TinyDRM API. Newer kernels moved simple display drivers to other DRM helpers,
-so forward-port compatibility is planned but not claimed yet.
+The first alpha was developed and tested against Ubuntu's
+`4.15.0-60-generic` kernel. That build retains the Linux 4.15 TinyDRM and CMA
+path. Ubuntu 26.04 amd64 compile verification uses `7.0.0-30-generic` and the
+modern simple-display-pipe, GEM DMA, and shadow-plane helpers. Runtime and
+physical-adapter verification on Ubuntu 26.04 is still pending.
+
+The source selects the legacy or modern DRM implementation at compile time.
+This is not a claim that every kernel version between 4.15 and 7.0 is
+supported; each distributed package remains bound to the kernel ABI recorded
+in its `X-USBDisplay-Kernel` field.
 
 The userspace daemon and diagnostic backends require only a C11 compiler and
 `libdl`. The Actions Micro backend additionally invokes `ffmpeg` with the

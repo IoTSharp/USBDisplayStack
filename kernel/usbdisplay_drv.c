@@ -20,6 +20,7 @@
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 
@@ -27,7 +28,19 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_modes.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 #include <drm/tinydrm/tinydrm.h>
+#else
+#include <drm/drm_connector.h>
+#include <drm/drm_damage_helper.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_managed.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_simple_kms_helper.h>
+#endif
 
 #include <usbdisplay/uapi.h>
 
@@ -48,7 +61,13 @@ module_param(height, uint, 0444);
 MODULE_PARM_DESC(height, "Virtual display height");
 
 struct usbdisplay_device {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	struct tinydrm_device tinydrm;
+#else
+	struct drm_device drm;
+	struct drm_simple_display_pipe pipe;
+	struct drm_connector connector;
+#endif
 	struct drm_display_mode mode;
 	struct fb_info *fb_info;
 	struct fb_deferred_io fb_deferred;
@@ -414,6 +433,7 @@ static struct fb_ops usbdisplay_fbdev_ops = {
 	.fb_mmap = usbdisplay_fbdev_mmap,
 };
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 static int usbdisplay_fb_dirty(struct drm_framebuffer *fb,
 			       struct drm_file *file_priv,
 			       unsigned int flags,
@@ -467,6 +487,97 @@ static const struct drm_simple_display_pipe_funcs usbdisplay_pipe_funcs = {
 };
 
 DEFINE_DRM_GEM_CMA_FOPS(usbdisplay_drm_fops);
+#else
+/* Modern DRM maps the atomic plane buffer before handing it to the driver. */
+static void usbdisplay_pipe_publish(struct drm_simple_display_pipe *pipe,
+				    struct drm_plane_state *old_state,
+				    struct drm_plane_state *state)
+{
+	struct usbdisplay_device *udev = state->fb->dev->dev_private;
+	struct drm_shadow_plane_state *shadow_state;
+	struct drm_clip_rect clip;
+	struct drm_rect damage;
+	bool has_damage = true;
+
+	shadow_state = to_drm_shadow_plane_state(state);
+	if (old_state != NULL) {
+		has_damage = drm_atomic_helper_damage_merged(old_state, state,
+						     &damage);
+	} else {
+		damage.x1 = 0;
+		damage.y1 = 0;
+		damage.x2 = state->fb->width;
+		damage.y2 = state->fb->height;
+	}
+	if (has_damage && shadow_state->data[0].vaddr != NULL &&
+	    !shadow_state->data[0].is_iomem) {
+		clip.x1 = damage.x1;
+		clip.y1 = damage.y1;
+		clip.x2 = damage.x2;
+		clip.y2 = damage.y2;
+		usbdisplay_publish(udev, shadow_state->data[0].vaddr,
+				   state->fb->width, state->fb->height,
+				   state->fb->pitches[0],
+				   usbdisplay_format_from_drm(
+					state->fb->format->format),
+				   &clip, 1, USBDISPLAY_SOURCE_DRM);
+	}
+}
+
+static void usbdisplay_pipe_enable(struct drm_simple_display_pipe *pipe,
+				   struct drm_crtc_state *crtc_state,
+				   struct drm_plane_state *plane_state)
+{
+	(void)crtc_state;
+	usbdisplay_pipe_publish(pipe, NULL, plane_state);
+}
+
+static void usbdisplay_pipe_update(struct drm_simple_display_pipe *pipe,
+				   struct drm_plane_state *old_state)
+{
+	struct drm_plane_state *state = pipe->plane.state;
+
+	if (pipe->crtc.state->active && state->fb != NULL) {
+		usbdisplay_pipe_publish(pipe, old_state, state);
+	}
+}
+
+static const struct drm_simple_display_pipe_funcs usbdisplay_pipe_funcs = {
+	.enable = usbdisplay_pipe_enable,
+	.update = usbdisplay_pipe_update,
+	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
+};
+
+static int usbdisplay_connector_get_modes(struct drm_connector *connector)
+{
+	struct usbdisplay_device *udev = connector->dev->dev_private;
+	int result;
+
+	result = drm_connector_helper_get_modes_fixed(connector, &udev->mode);
+
+	return result;
+}
+
+static const struct drm_connector_helper_funcs usbdisplay_connector_helpers = {
+	.get_modes = usbdisplay_connector_get_modes,
+};
+
+static const struct drm_connector_funcs usbdisplay_connector_funcs = {
+	.reset = drm_atomic_helper_connector_reset,
+	.fill_modes = drm_helper_probe_single_connector_modes,
+	.destroy = drm_connector_cleanup,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+static const struct drm_mode_config_funcs usbdisplay_mode_config_funcs = {
+	.fb_create = drm_gem_fb_create_with_dirty,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = drm_atomic_helper_commit,
+};
+
+DEFINE_DRM_GEM_DMA_FOPS(usbdisplay_drm_fops);
+#endif
 
 /* DRM 文件生命周期与 fbdev 共用生产者计数，避免静态业务画面被误判为空闲。 */
 static int usbdisplay_drm_open(struct drm_device *device,
@@ -488,15 +599,25 @@ static void usbdisplay_drm_postclose(struct drm_device *device,
 }
 
 static struct drm_driver usbdisplay_drm_driver = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_PRIME |
 			   DRIVER_ATOMIC,
+#else
+	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
+#endif
 	.fops = &usbdisplay_drm_fops,
 	.open = usbdisplay_drm_open,
 	.postclose = usbdisplay_drm_postclose,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	TINYDRM_GEM_DRIVER_OPS,
+#else
+	DRM_GEM_DMA_DRIVER_OPS_VMAP,
+#endif
 	.name = USBDISPLAY_DRIVER_NAME,
 	.desc = USBDISPLAY_DRIVER_DESC,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	.date = USBDISPLAY_DRIVER_DATE,
+#endif
 	.major = 0,
 	.minor = 1,
 };
@@ -648,7 +769,11 @@ static int usbdisplay_stream_mmap(struct file *file,
 	} else if (requested != udev->map_bytes || vma->vm_pgoff != 0) {
 		result = -EINVAL;
 	} else {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+#else
+		vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+#endif
 		result = remap_vmalloc_range(vma, udev->frame_ring, 0);
 	}
 
@@ -666,7 +791,11 @@ static const struct file_operations usbdisplay_stream_fops = {
 	.compat_ioctl = usbdisplay_stream_ioctl,
 #endif
 	.mmap = usbdisplay_stream_mmap,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	.llseek = no_llseek,
+#else
+	.llseek = noop_llseek,
+#endif
 };
 
 static void usbdisplay_vfree(void *data)
@@ -683,8 +812,13 @@ static void usbdisplay_drm_unregister(void *data)
 {
 	struct usbdisplay_device *udev = data;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 	drm_atomic_helper_shutdown(udev->tinydrm.drm);
 	drm_dev_unregister(udev->tinydrm.drm);
+#else
+	drm_dev_unplug(&udev->drm);
+	drm_atomic_helper_shutdown(&udev->drm);
+#endif
 }
 
 static void usbdisplay_fbdev_unregister(void *data)
@@ -724,7 +858,11 @@ static int usbdisplay_register_fbdev(struct device *device,
 			udev->fb_info = info;
 			info->par = udev;
 			info->fbops = &usbdisplay_fbdev_ops;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 			info->flags = FBINFO_DEFAULT | FBINFO_VIRTFB;
+#else
+			info->flags = FBINFO_VIRTFB;
+#endif
 			info->screen_buffer = udev->fb_memory;
 			info->screen_size = udev->fb_bytes;
 			info->pseudo_palette = udev->pseudo_palette;
@@ -813,9 +951,20 @@ static int usbdisplay_probe(struct platform_device *platform)
 	    height > USBDISPLAY_MAX_HEIGHT) {
 		result = -EINVAL;
 	} else {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 		udev = devm_kzalloc(device, sizeof(*udev), GFP_KERNEL);
+#else
+		udev = devm_drm_dev_alloc(device, &usbdisplay_drm_driver,
+					  struct usbdisplay_device, drm);
+		if (IS_ERR(udev)) {
+			result = PTR_ERR(udev);
+			udev = NULL;
+		}
+#endif
 		if (udev == NULL) {
-			result = -ENOMEM;
+			if (result == 0) {
+				result = -ENOMEM;
+			}
 		} else {
 			platform_set_drvdata(platform, udev);
 			mutex_init(&udev->publish_lock);
@@ -836,13 +985,28 @@ static int usbdisplay_probe(struct platform_device *platform)
 			}
 
 			if (result == 0) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 				result = devm_tinydrm_init(device, &udev->tinydrm,
 							  &usbdisplay_fb_funcs,
 							  &usbdisplay_drm_driver);
+#else
+				result = drmm_mode_config_init(&udev->drm);
+#endif
 			}
 			if (result == 0) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 				udev->tinydrm.drm->dev_private = udev;
 				udev->tinydrm.drm->mode_config.preferred_depth = 32;
+#else
+				udev->drm.dev_private = udev;
+				udev->drm.mode_config.funcs =
+					&usbdisplay_mode_config_funcs;
+				udev->drm.mode_config.preferred_depth = 32;
+				udev->drm.mode_config.min_width = width;
+				udev->drm.mode_config.max_width = width;
+				udev->drm.mode_config.min_height = height;
+				udev->drm.mode_config.max_height = height;
+#endif
 				memset(&udev->mode, 0, sizeof(udev->mode));
 				udev->mode.hdisplay = width;
 				udev->mode.hsync_start = width;
@@ -855,15 +1019,40 @@ static int usbdisplay_probe(struct platform_device *platform)
 				udev->mode.type = DRM_MODE_TYPE_DRIVER |
 						  DRM_MODE_TYPE_PREFERRED;
 				udev->mode.clock = 1;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 				result = tinydrm_display_pipe_init(&udev->tinydrm,
 						&usbdisplay_pipe_funcs,
 						DRM_MODE_CONNECTOR_VIRTUAL,
 						formats, ARRAY_SIZE(formats),
 						&udev->mode, 0);
+#else
+				drm_connector_helper_add(&udev->connector,
+							 &usbdisplay_connector_helpers);
+				result = drm_connector_init(&udev->drm,
+							    &udev->connector,
+							    &usbdisplay_connector_funcs,
+							    DRM_MODE_CONNECTOR_VIRTUAL);
+				if (result == 0) {
+					result = drm_simple_display_pipe_init(
+						&udev->drm, &udev->pipe,
+						&usbdisplay_pipe_funcs, formats,
+						ARRAY_SIZE(formats), NULL,
+						&udev->connector);
+				}
+				if (result == 0) {
+					drm_plane_enable_fb_damage_clips(
+						&udev->pipe.plane);
+				}
+#endif
 			}
 			if (result == 0) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
 				drm_mode_config_reset(udev->tinydrm.drm);
 				result = drm_dev_register(udev->tinydrm.drm, 0);
+#else
+				drm_mode_config_reset(&udev->drm);
+				result = drm_dev_register(&udev->drm, 0);
+#endif
 			}
 			if (result == 0) {
 				result = devm_add_action(device,
