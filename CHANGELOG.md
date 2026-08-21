@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Render a redesigned connection-status splash with the project URL, support
+  QQ, and PCCT-injected package version while no fbdev or DRM producer is open,
+  and restore it when the last producer exits.
+- Build the i386 userspace package in the PCCT image, include all installation
+  scripts in the Debian artifact, and make APT resolve FFmpeg/runtime depends.
 - Continue command and video sequence high-water marks across an Actions Micro
   backend reopen after a successful usbfs reset, while retaining captured
   sequence values after a failed reset or real device disappearance.

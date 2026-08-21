@@ -1,26 +1,38 @@
-# 离线 Debian 包
+# 单文件 Debian 包与离线安装
 
 USBDisplayStack 的内核模块必须与目标机正在运行的内核完全匹配。因此每个
 `.deb` 都绑定一个 `uname -r` 和一个 Debian 架构；安装脚本会在写入系统前
 同时检查内核、架构和 SHA-256，避免把不兼容的模块装入车道机。
 
-## 生成包
+## 使用 PCCT 生成包
 
-应在具有目标内核准确头文件的 Linux 构建环境中执行：
+内核模块必须先使用目标内核的准确头文件构建。用户态程序和 DEB 由 PCCT
+i386 镜像编译、打包；构建脚本通过 `docker cp` 复制源码，不会把当前仓库
+bind mount 到容器中：
 
-```bash
-make userspace
-make module KDIR=/lib/modules/$(uname -r)/build
-sh scripts/package-deb.sh 0.2.0 dist
+```powershell
+pwsh ./scripts/build-pcct-deb.ps1 \
+  -Version 0.2.3 \
+  -KernelModule D:\path\to\usbdisplay.ko \
+  -KernelRelease 4.15.0-60-generic \
+  -Architecture i386
 ```
 
-也可以显式指定内核和架构。`kernel/usbdisplay.ko` 必须已经用同一套
-`KERNEL_RELEASE` 头文件构建，脚本不会把其他版本的模块伪装成目标版本：
+默认镜像为 `ghcr.io/iotsharp/pcct-build-x86:latest`。传入的
+`usbdisplay.ko` 必须已经用同一套 `KERNEL_RELEASE` 头文件构建，打包脚本会
+读取 `vermagic`，不会把其他版本的模块伪装成目标版本。
+
+如果已经位于合适的 Linux/PCCT 容器内，也可以直接执行：
 
 ```bash
-KERNEL_RELEASE=4.15.0-60-generic DEB_ARCH=amd64 \
-  sh scripts/package-deb.sh 0.2.0 dist
+make userspace USBDISPLAY_VERSION=0.2.3
+KERNEL_MODULE=/path/to/usbdisplay.ko \
+KERNEL_RELEASE=4.15.0-60-generic DEB_ARCH=i386 \
+  sh scripts/package-deb.sh 0.2.3 dist
 ```
+
+`build-pcct-deb.ps1` 会把同一个 `-Version` 值注入 `usb-displayd` 内置 Splash，
+因此设备画面中的版本号和 DEB 元数据保持一致，不需要长期硬编码。
 
 输出目录包含：
 
@@ -29,22 +41,37 @@ KERNEL_RELEASE=4.15.0-60-generic DEB_ARCH=amd64 \
 - `install-usbdisplay-offline.sh` 离线安装脚本。
 
 `.deb` 内含 `usbdisplay.ko`、`usb-displayd`、三个后端、诊断工具、udev 和
-systemd 配置，以及 `usbdisplay-check`。它不包含初始化 replay，也不捆绑
-FFmpeg。Actions Micro 实体后端要求目标机已经有带 `libx264` 编码器的
-`ffmpeg`；安装脚本只检查本机状态，绝不会联网补依赖。
+systemd 配置、`usbdisplay-check`，以及项目的全部安装/卸载脚本。它不包含
+初始化 replay，也不直接复制某个发行版的 FFmpeg 动态库；DEB 通过标准
+`Depends` 声明 `ffmpeg`，由 APT 选择与目标系统兼容的 `libx264` 和其他
+运行库。`postinst` 会再次验证 FFmpeg 是否实际提供 `libx264` 编码器。
 
-## 仅安装
+## 单 DEB 在线安装
 
-把 `.deb`、`.sha256` 和安装脚本放在同一目录后运行：
+目标机能够访问正确的 APT 软件源时，用户只需下载一个 `.deb`：
+
+```bash
+sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+```
+
+APT 会安装 `ffmpeg`、`systemd`、`udev`、`kmod` 及其动态库依赖，再执行 DEB
+内的 `preinst/postinst`。直接运行 `dpkg -i` 不会下载依赖，不应作为在线一键
+安装命令。安装会刷新 `depmod`、udev 和 systemd，但不会加载模块、启动服务
+或改动车道应用。
+
+## 完全离线安装
+
+完全离线时，目标机必须预先具备 DEB 声明的依赖。把 `.deb`、`.sha256` 和
+构建输出的离线脚本放在同一目录后运行：
 
 ```bash
 sudo sh ./install-usbdisplay-offline.sh \
-  ./usbdisplay-stack_0.2.0+kernel.4.15.0-60-generic_amd64.deb
+  ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
 ```
 
-这一步安装文件并刷新 `depmod`、udev 和 systemd，但不会加载模块、启动服务
-或改动车道应用。若确实无法提供校验文件，可以显式使用 `--skip-checksum`；
-现场正常交付不应跳过校验。
+离线脚本不会联网补依赖。若确实无法提供校验文件，可以显式使用
+`--skip-checksum`；现场正常交付不应跳过校验。安装脚本也随 DEB 保存在
+`/usr/share/usbdisplay/install-scripts/`，用于包内容审计和恢复场景。
 
 ## 配置并启用实体适配器
 
@@ -58,7 +85,7 @@ sudo sh ./install-usbdisplay-offline.sh \
   --bootstrap full \
   --width 1920 --height 1080 \
   --enable \
-  ./usbdisplay-stack_0.2.0+kernel.4.15.0-60-generic_amd64.deb
+  ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
 ```
 
 安装脚本把 replay 以 `0600` 权限放到

@@ -112,8 +112,9 @@ install -d \
 	"$package_root/lib/systemd/system" \
 	"$package_root/usr/bin" \
 	"$package_root/usr/lib/usbdisplay" \
-	"$package_root/usr/share/doc/$package_name" \
+	"$package_root/usr/share/doc/$package_name/docs/assets" \
 	"$package_root/usr/share/usbdisplay" \
+	"$package_root/usr/share/usbdisplay/install-scripts" \
 	"$package_root/var/lib/usbdisplay"
 
 install -m 0644 "$kernel_module" \
@@ -149,6 +150,13 @@ install -m 0644 "$project_dir/README.md" "$project_dir/README.zh-CN.md" \
 	"$package_root/usr/share/doc/$package_name/"
 install -m 0644 "$project_dir/LICENSE" \
 	"$package_root/usr/share/doc/$package_name/copyright"
+install -m 0644 "$project_dir/docs/assets/usbdisplay-splash.png" \
+	"$package_root/usr/share/doc/$package_name/docs/assets/usbdisplay-splash.png"
+for install_script in install.sh install-prebuilt.sh install-offline-deb.sh \
+		uninstall.sh; do
+	install -m 0755 "$project_dir/scripts/$install_script" \
+		"$package_root/usr/share/usbdisplay/install-scripts/$install_script"
+done
 printf '%s\n' "$kernel_release" > \
 	"$package_root/usr/share/usbdisplay/KERNEL_RELEASE"
 printf '%s\n' "$version" > "$package_root/usr/share/usbdisplay/VERSION"
@@ -160,16 +168,16 @@ Version: $package_version
 Architecture: $package_architecture
 Maintainer: USBDisplayStack maintainers <noreply@iotsharp.net>
 Installed-Size: $installed_size
-Depends: libc6 (>= 2.17), kmod
-Suggests: ffmpeg
+Depends: libc6 (>= 2.17), kmod, systemd, udev, ffmpeg
 Section: kernel
 Priority: optional
 X-USBDisplay-Kernel: $kernel_release
 Homepage: https://github.com/IoTSharp/USBDisplayStack
 Description: USB display virtual DRM/fbdev stack
  Kernel module, frame transport daemon, Actions Micro USB-HDMI backend,
- diagnostic tools, and a physical-readiness checker. This package is tied
- to Linux kernel $kernel_release and does not download dependencies.
+ diagnostic tools, installation scripts, and a physical-readiness checker.
+ This package is tied to Linux kernel $kernel_release; install it with APT so
+ FFmpeg and its runtime libraries are resolved automatically.
 EOF
 
 cat > "$package_root/DEBIAN/conffiles" <<'EOF'
@@ -206,6 +214,11 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 if command -v udevadm >/dev/null 2>&1; then
 	udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+if ! command -v ffmpeg >/dev/null 2>&1 ||
+   ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q '[[:space:]]libx264[[:space:]]'; then
+	printf '%s\n' 'usbdisplay-stack: ffmpeg with the libx264 encoder is required.' >&2
+	exit 1
 fi
 printf '%s\n' 'usbdisplay-stack installed; module and service were not started automatically.'
 exit 0

@@ -64,6 +64,7 @@ struct usbdisplay_device {
 	unsigned int next_slot;
 	int held_slot;
 	atomic_t consumer_open;
+	atomic_t producer_open;
 	u32 pseudo_palette[USBDISPLAY_PALETTE_SIZE];
 	struct usbdisplay_update latest_update;
 };
@@ -75,6 +76,8 @@ struct usbdisplay_file {
 };
 
 static struct platform_device *usbdisplay_platform_device;
+
+static int usbdisplay_publish_initial(struct usbdisplay_device *udev);
 
 static uint32_t usbdisplay_format_from_drm(uint32_t drm_format)
 {
@@ -236,6 +239,41 @@ static int usbdisplay_fbdev_publish(struct fb_info *info)
 	return result;
 }
 
+/* 仅统计真实用户态生产者；最后一个应用退出后通知守护进程恢复状态页。 */
+static void usbdisplay_producer_opened(struct usbdisplay_device *udev)
+{
+	atomic_inc(&udev->producer_open);
+}
+
+static void usbdisplay_producer_closed(struct usbdisplay_device *udev)
+{
+	if (atomic_dec_and_test(&udev->producer_open)) {
+		usbdisplay_publish_initial(udev);
+	}
+}
+
+static int usbdisplay_fbdev_open(struct fb_info *info, int user)
+{
+	int result = 0;
+
+	if (user != 0) {
+		usbdisplay_producer_opened(info->par);
+	}
+
+	return result;
+}
+
+static int usbdisplay_fbdev_release(struct fb_info *info, int user)
+{
+	int result = 0;
+
+	if (user != 0) {
+		usbdisplay_producer_closed(info->par);
+	}
+
+	return result;
+}
+
 static ssize_t usbdisplay_fbdev_write(struct fb_info *info,
 				      const char __user *buffer,
 				      size_t count, loff_t *position)
@@ -363,6 +401,8 @@ static void usbdisplay_fbdev_deferred_io(struct fb_info *info,
 
 static struct fb_ops usbdisplay_fbdev_ops = {
 	.owner = THIS_MODULE,
+	.fb_open = usbdisplay_fbdev_open,
+	.fb_release = usbdisplay_fbdev_release,
 	.fb_read = fb_sys_read,
 	.fb_write = usbdisplay_fbdev_write,
 	.fb_check_var = usbdisplay_fbdev_check_var,
@@ -428,10 +468,31 @@ static const struct drm_simple_display_pipe_funcs usbdisplay_pipe_funcs = {
 
 DEFINE_DRM_GEM_CMA_FOPS(usbdisplay_drm_fops);
 
+/* DRM 文件生命周期与 fbdev 共用生产者计数，避免静态业务画面被误判为空闲。 */
+static int usbdisplay_drm_open(struct drm_device *device,
+			       struct drm_file *file)
+{
+	int result = 0;
+
+	(void)file;
+	usbdisplay_producer_opened(device->dev_private);
+
+	return result;
+}
+
+static void usbdisplay_drm_postclose(struct drm_device *device,
+				     struct drm_file *file)
+{
+	(void)file;
+	usbdisplay_producer_closed(device->dev_private);
+}
+
 static struct drm_driver usbdisplay_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_PRIME |
 			   DRIVER_ATOMIC,
 	.fops = &usbdisplay_drm_fops,
+	.open = usbdisplay_drm_open,
+	.postclose = usbdisplay_drm_postclose,
 	TINYDRM_GEM_DRIVER_OPS,
 	.name = USBDISPLAY_DRIVER_NAME,
 	.desc = USBDISPLAY_DRIVER_DESC,
@@ -717,6 +778,7 @@ static int usbdisplay_register_fbdev(struct device *device,
 	return result;
 }
 
+/* INITIAL 帧是无业务应用状态信号，具体 Splash 由用户态守护进程绘制。 */
 static int usbdisplay_publish_initial(struct usbdisplay_device *udev)
 {
 	void *blank;
@@ -759,6 +821,7 @@ static int usbdisplay_probe(struct platform_device *platform)
 			mutex_init(&udev->publish_lock);
 			init_waitqueue_head(&udev->update_wait);
 			atomic_set(&udev->consumer_open, 0);
+			atomic_set(&udev->producer_open, 0);
 			udev->held_slot = -1;
 
 			maximum_stride = ALIGN((size_t)width * 4, 256);

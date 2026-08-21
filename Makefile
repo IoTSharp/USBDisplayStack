@@ -19,6 +19,7 @@ examples-lvgl:
 check:
 	sh tests/test-usbdisplay-check.sh
 	sh tests/test-package-deb.sh
+	sh tests/test-splash-preview.sh
 
 clean:
 	$(MAKE) -C userspace BUILD_DIR=$(BUILD_DIR) clean

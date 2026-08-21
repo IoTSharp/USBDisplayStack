@@ -18,6 +18,8 @@
 #include <usbdisplay/backend.h>
 #include <usbdisplay/uapi.h>
 
+#include "splash.h"
+
 #define DEFAULT_DEVICE "/dev/usbdisplay0"
 #define BACKEND_TICK_INTERVAL_MS 100
 #define DEFAULT_BACKEND_RETRY_MS 2000U
@@ -278,9 +280,24 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 	int poll_result;
 	uint64_t now_ns = 0;
 	uint64_t last_submit_ns = 0;
+	uint32_t *splash_pixels = NULL;
+	size_t splash_bytes;
 	bool frame_valid = false;
 	int result = 0;
 
+	/* INITIAL 只表示当前没有业务生产者，守护进程在实体链路就绪后替换为状态页。 */
+	splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
+	if (splash_bytes == 0) {
+		result = -EOVERFLOW;
+	} else {
+		splash_pixels = malloc(splash_bytes);
+		if (splash_pixels == NULL) {
+			result = -ENOMEM;
+		} else {
+			result = usbdisplay_splash_render(splash_pixels, info->width,
+						      info->height, info->width * 4U);
+		}
+	}
 	descriptor.fd = device_fd;
 	descriptor.events = POLLIN;
 	descriptor.revents = 0;
@@ -303,20 +320,31 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 				if (result == 0) {
 					memset(&frame, 0, sizeof(frame));
 					frame.struct_size = sizeof(frame);
-					frame.pixels = (const char *)mapping +
-						       ((size_t)update.slot * info->slot_bytes);
-					frame.bytes = (size_t)update.stride * update.height;
+					if (update.source == USBDISPLAY_SOURCE_INITIAL) {
+						frame.pixels = splash_pixels;
+						frame.bytes = splash_bytes;
+						frame.width = info->width;
+						frame.height = info->height;
+						frame.stride = info->width * 4U;
+						frame.format = USBDISPLAY_FORMAT_XRGB8888;
+						frame.damage_width = info->width;
+						frame.damage_height = info->height;
+					} else {
+						frame.pixels = (const char *)mapping +
+							       ((size_t)update.slot * info->slot_bytes);
+						frame.bytes = (size_t)update.stride * update.height;
+						frame.width = update.width;
+						frame.height = update.height;
+						frame.stride = update.stride;
+						frame.format = update.format;
+						frame.damage_x = update.damage_x;
+						frame.damage_y = update.damage_y;
+						frame.damage_width = update.damage_width;
+						frame.damage_height = update.damage_height;
+					}
 					frame.sequence = update.sequence;
 					frame.timestamp_ns = update.timestamp_ns;
-					frame.width = update.width;
-					frame.height = update.height;
-					frame.stride = update.stride;
-					frame.format = update.format;
 					frame.source = update.source;
-					frame.damage_x = update.damage_x;
-					frame.damage_y = update.damage_y;
-					frame.damage_width = update.damage_width;
-					frame.damage_height = update.damage_height;
 					result = backend->submit(backend_context, &frame);
 					if (result == 0) {
 						frame_valid = true;
@@ -348,6 +376,7 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			result = backend->tick(backend_context, now_ns);
 		}
 	}
+	free(splash_pixels);
 
 	return result;
 }

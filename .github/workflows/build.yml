@@ -3,6 +3,15 @@ name: build
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'DEB version; leave blank for an automatic CI or tag version'
+        required: false
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   userspace:
@@ -32,4 +41,103 @@ jobs:
         run: |
           KDIR=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)
           test -n "$KDIR"
+          test -d "$KDIR"
           make module KDIR="$KDIR"
+
+  debian-package:
+    name: package Debian artifact
+    runs-on: ubuntu-latest
+    env:
+      KERNEL_RELEASE: 4.15.0-60-generic
+      KERNEL_ARCHITECTURE: i386
+      PCCT_IMAGE: ghcr.io/iotsharp/pcct-build-x86:latest
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          set -eu
+          if [ -n "$REQUESTED_VERSION" ]; then
+            version="$REQUESTED_VERSION"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
+          case "$version" in
+            ''|[!0-9]*|*[!0-9A-Za-z.+~-]*)
+              printf 'Invalid package version: %s\n' "$version" >&2
+              exit 2
+              ;;
+            *) ;;
+          esac
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'Building USBDisplayStack version %s\n' "$version"
+
+      - name: Build target-kernel module without a bind mount
+        shell: bash
+        run: |
+          set -eu
+          container_name="usbdisplay-kernel-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT HUP INT TERM
+          docker create --name "$container_name" ubuntu:18.04 sh -lc '
+            set -eu
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -o Acquire::Retries=5 update
+            apt-get -o Acquire::Retries=5 install -y --no-install-recommends build-essential linux-headers-4.15.0-60-generic
+            cd /src
+            make module KDIR=/lib/modules/4.15.0-60-generic/build
+            strings kernel/usbdisplay.ko | grep -q "^vermagic=4.15.0-60-generic "
+          ' >/dev/null
+          docker cp ./. "$container_name:/src"
+          docker start --attach "$container_name"
+          docker cp "$container_name:/src/kernel/usbdisplay.ko" "$RUNNER_TEMP/usbdisplay.ko"
+
+      - name: Build and package with PCCT
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/build-pcct-deb.ps1 `
+            -Version "$env:PACKAGE_VERSION" `
+            -KernelModule "$env:RUNNER_TEMP/usbdisplay.ko" `
+            -KernelRelease "$env:KERNEL_RELEASE" `
+            -Architecture "$env:KERNEL_ARCHITECTURE" `
+            -Image "$env:PCCT_IMAGE" `
+            -OutputDirectory "$env:GITHUB_WORKSPACE/dist-pcct"
+
+      - name: Verify Debian metadata and checksum
+        shell: bash
+        run: |
+          set -eu
+          package=$(find dist-pcct -maxdepth 1 -type f -name '*.deb' -print -quit)
+          test -n "$package"
+          test "$(dpkg-deb -f "$package" Architecture)" = i386
+          test "$(dpkg-deb -f "$package" X-USBDisplay-Kernel)" = "$KERNEL_RELEASE"
+          depends=$(dpkg-deb -f "$package" Depends)
+          for dependency in kmod systemd udev ffmpeg; do
+            printf '%s\n' "$depends" | grep -q "\b$dependency\b"
+          done
+          package_contents="$RUNNER_TEMP/usbdisplay-package-contents.txt"
+          dpkg-deb -c "$package" > "$package_contents"
+          grep -q './usr/share/usbdisplay/install-scripts/install-offline-deb.sh' \
+            "$package_contents"
+          grep -q './usr/share/doc/usbdisplay-stack/docs/assets/usbdisplay-splash.png' \
+            "$package_contents"
+          (cd dist-pcct && sha256sum -c "$(basename "$package").sha256")
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbdisplay-stack-deb-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          path: |
+            dist-pcct/*.deb
+            dist-pcct/*.deb.sha256
+            dist-pcct/install-usbdisplay-offline.sh

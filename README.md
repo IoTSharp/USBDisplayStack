@@ -122,6 +122,15 @@ generation after recovery, and waits inside the same process for reconnect.
 The virtual framebuffer can exist without a USB adapter. `--ready-file PATH`
 and `--retry-ms N` customize the marker and retry interval.
 
+When the physical backend and driver are ready but no fbdev or DRM producer is
+open, the daemon renders a built-in status splash. The splash shows the proven
+`SOFTWARE -> DRIVER -> USB DISPLAY` connection, the project address,
+`QQ:100860505`, and the package build version. A static application frame is
+never replaced by an inactivity timeout; the splash returns only after the
+last producer closes.
+
+![USBDisplayStack connection-status splash](docs/assets/usbdisplay-splash.png)
+
 ## Application examples
 
 Run only one producer at a time. Both LVGL examples render the same dashboard:
@@ -154,21 +163,33 @@ sudo systemctl enable --now usb-displayd.service
 Set the virtual resolution in `/etc/modprobe.d/usbdisplay.conf` and select a
 backend in `/etc/default/usb-displayd` before enabling the service.
 
-For an offline Debian artifact tied to the exact running kernel, build and
-install with:
+For a kernel-bound i386 Debian artifact, compile the userspace stack and build
+the package in the PCCT image without bind-mounting the source tree:
 
-```bash
-make userspace
-make module KDIR=/lib/modules/$(uname -r)/build
-sh scripts/package-deb.sh 0.2.0 dist
-sudo sh dist/install-usbdisplay-offline.sh dist/usbdisplay-stack_*.deb
+```powershell
+pwsh ./scripts/build-pcct-deb.ps1 \
+  -Version 0.2.3 \
+  -KernelModule /path/to/usbdisplay.ko
 ```
 
-The installer verifies the adjacent SHA-256 file, package architecture, and
-exact `uname -r`. It never downloads dependencies and does not activate the
-module unless `--enable` is given. See the
-[offline Debian package guide](docs/offline-deb.zh-CN.md) for physical backend
-configuration and artifact boundaries.
+Only the resulting `.deb` is required on a network-connected target. Install
+it through APT so `ffmpeg`, `libx264`, and the remaining runtime libraries are
+resolved automatically:
+
+```bash
+sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+```
+
+GitHub Actions runs the same PCCT packaging path on every push and pull request.
+It uploads the `.deb`, its SHA-256 sidecar, and the offline installer as a
+workflow artifact. A `vX.Y.Z` tag uses `X.Y.Z`; the manual workflow dispatch can
+override the version when a release artifact is needed.
+
+The package contains its Debian lifecycle hooks and all project installation
+scripts. It deliberately does not activate the module or select the physical
+backend because that requires an authorized replay template and explicit lane
+configuration. See the [Debian package guide](docs/offline-deb.zh-CN.md) for
+offline installation, physical backend configuration, and artifact boundaries.
 
 `usbdisplay-check` is suitable for installers and supervisors. Its default
 exit status is zero only when the virtual devices, live daemon marker, physical

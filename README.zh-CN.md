@@ -106,6 +106,14 @@ HID 断开时清理该文件，在同一进程内等待重连，并在恢复后�
 必须校验该文件和守护进程 PID，不能仅凭 `/dev/fb1` 存在就认为 HDMI 已连接。
 可通过 `--ready-file PATH` 和 `--retry-ms N` 调整路径与重连间隔。
 
+实体后端和驱动已就绪、但没有 fbdev 或 DRM 应用打开画面时，守护进程会显示
+内置工作状态 Splash。界面只展示已经能够证明的
+`SOFTWARE -> DRIVER -> USB DISPLAY` 链路、项目地址、`QQ:100860505` 和打包
+版本号。静态业务画面不会因为长时间不刷新而被覆盖；只有最后一个画面生产者
+关闭后才恢复 Splash。
+
+![USBDisplayStack 工作状态 Splash](docs/assets/usbdisplay-splash.png)
+
 ## 应用示例
 
 同一时间只运行一个渲染生产者。两个 LVGL 示例显示同一套仪表盘：
@@ -136,18 +144,28 @@ sudo systemctl enable --now usb-displayd.service
 启动前请在 `/etc/modprobe.d/usbdisplay.conf` 设置虚拟分辨率，并在
 `/etc/default/usb-displayd` 选择后端。
 
-需要离线交付时，可以生成与目标机当前内核严格绑定的 Debian 包：
+使用 PCCT 镜像编译用户态程序并生成与目标机内核严格绑定的 i386 Debian 包：
 
-```bash
-make userspace
-make module KDIR=/lib/modules/$(uname -r)/build
-sh scripts/package-deb.sh 0.2.0 dist
-sudo sh dist/install-usbdisplay-offline.sh dist/usbdisplay-stack_*.deb
+```powershell
+pwsh ./scripts/build-pcct-deb.ps1 \
+  -Version 0.2.3 \
+  -KernelModule /path/to/usbdisplay.ko
 ```
 
-安装脚本校验同目录 SHA-256、包架构和准确的 `uname -r`，不会联网补依赖，
-也不会在没有 `--enable` 时加载模块或启动服务。实体后端配置和交付边界详见
-[离线 Debian 包](docs/offline-deb.zh-CN.md)。
+目标机能够访问 APT 软件源时，只需下载生成的一个 `.deb`。必须使用 APT 安装，
+由其自动安装 `ffmpeg`、`libx264` 和其他动态库：
+
+```bash
+sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
+```
+
+GitHub Actions 会在每次 push 和 pull request 时执行同一套 PCCT 打包流程，并上传
+`.deb`、SHA-256 校验文件和离线安装脚本作为 workflow artifact。推送 `vX.Y.Z` 标签
+时使用 `X.Y.Z` 作为包版本；也可以手动运行 workflow 并填写版本号。
+
+DEB 已包含 Debian 生命周期脚本和项目的全部安装/卸载脚本。出于现场安全和
+replay 授权边界，安装后仍不会自动加载模块、选择实体后端或启动服务。离线安装、
+实体后端配置和交付边界详见[单文件 Debian 包与离线安装](docs/offline-deb.zh-CN.md)。
 
 `usbdisplay-check` 可供安装脚本和监控程序调用。默认只有虚拟设备、活动守护
 进程标记、实体后端和预期的 `185b:2d1d` USB 适配器全部存在时才返回 `0`：

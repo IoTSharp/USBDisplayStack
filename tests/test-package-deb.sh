@@ -58,6 +58,7 @@ DEB_ARCH=amd64 \
 	"$output_dir" >/dev/null
 
 package_file=$output_dir/usbdisplay-stack_${package_version}+kernel.${kernel_release}_amd64.deb
+package_contents=$test_root/package-contents.txt
 [ -f "$package_file" ]
 [ -f "$package_file.sha256" ]
 [ -x "$output_dir/install-usbdisplay-offline.sh" ]
@@ -65,11 +66,22 @@ package_file=$output_dir/usbdisplay-stack_${package_version}+kernel.${kernel_rel
 [ "$(dpkg-deb -f "$package_file" Package)" = usbdisplay-stack ]
 [ "$(dpkg-deb -f "$package_file" Architecture)" = amd64 ]
 [ "$(dpkg-deb -f "$package_file" X-USBDisplay-Kernel)" = "$kernel_release" ]
-dpkg-deb -c "$package_file" | grep -q \
-	"./lib/modules/$kernel_release/extra/usbdisplay.ko"
-dpkg-deb -c "$package_file" | grep -q './usr/bin/usbdisplay-check'
-dpkg-deb -c "$package_file" | grep -q \
-	'./lib/systemd/system/usb-displayd.service'
+depends=$(dpkg-deb -f "$package_file" Depends)
+for dependency in kmod systemd udev ffmpeg; do
+	printf '%s\n' "$depends" | grep -q "\\b$dependency\\b"
+done
+dpkg-deb -c "$package_file" > "$package_contents"
+grep -q "./lib/modules/$kernel_release/extra/usbdisplay.ko" \
+	"$package_contents"
+grep -q './usr/bin/usbdisplay-check' "$package_contents"
+grep -q './lib/systemd/system/usb-displayd.service' "$package_contents"
+grep -q './usr/share/doc/usbdisplay-stack/docs/assets/usbdisplay-splash.png' \
+	"$package_contents"
+for install_script in install.sh install-prebuilt.sh install-offline-deb.sh \
+		uninstall.sh; do
+	grep -q "./usr/share/usbdisplay/install-scripts/$install_script" \
+		"$package_contents"
+done
 (
 	cd "$output_dir"
 	sha256sum -c "${package_file##*/}.sha256" >/dev/null
