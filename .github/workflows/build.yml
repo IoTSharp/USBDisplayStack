@@ -185,6 +185,7 @@ jobs:
       contents: write
       packages: write
     env:
+      GH_REPO: ${{ github.repository }}
       OCI_PACKAGE: ghcr.io/iotsharp/usbdisplaystack-deb
       PACKAGE_VERSION: ${{ needs.debian-package.outputs.version }}
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
