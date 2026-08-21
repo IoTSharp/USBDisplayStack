@@ -10,6 +10,40 @@ DRM/KMS 设备渲染；协议、压缩和 USB 传输由可替换的用户态后�
 > 工作。Actions Micro `185b:2d1d` 实时后端已经实现，但仍处于实验阶段，
 > 默认不启用。
 
+## 快速安装
+
+CI 会生成一个与目标内核绑定的 Debian 安装包。打开
+[GitHub Actions](https://github.com/IoTSharp/USBDisplayStack/actions)，进入成功的
+`build` 任务，下载 `usbdisplay-stack-deb-<版本>` artifact，并解压其中的
+`.deb` 文件。
+
+当前 CI 安装包只适用于 Linux `4.15.0-60-generic` 和 Debian `i386`。安装前先
+核对目标机：
+
+```bash
+uname -r
+dpkg --print-architecture
+```
+
+当输出分别为 `4.15.0-60-generic` 和 `i386` 时，只需通过 APT 安装这一个包：
+
+```bash
+sudo apt install ./usbdisplay-stack_*+kernel.4.15.0-60-generic_i386.deb
+```
+
+APT 会自动安装 `ffmpeg`、`kmod`、`systemd`、`udev` 及兼容的动态库。安装后
+可检查软件包和当前显示链路状态：
+
+```bash
+dpkg -s usbdisplay-stack
+usbdisplay-check --json
+```
+
+出于现场安全和 replay 授权边界，安装本身不会加载内核模块或启用服务。
+Actions Micro 实体适配器还必须配置有权使用的 replay 模板；完成显式激活前，
+`usbdisplay-check` 显示未就绪属于预期结果。完整激活步骤和离线安装方法见
+[单文件 Debian 包与离线安装](docs/offline-deb.zh-CN.md)。
+
 ## 架构
 
 ```text
@@ -131,7 +165,7 @@ dotnet run --project examples/csharp/Fbdev -- /dev/fb1
 dotnet run --project examples/csharp/Drm -- /dev/dri/card1
 ```
 
-## 安装
+## 从源码安装与打包
 
 `scripts/install.sh` 安装当前内核的模块、用户态程序、后端、udev 规则和
 systemd 文件，但不会自动加载模块或启用服务。
@@ -150,13 +184,6 @@ sudo systemctl enable --now usb-displayd.service
 pwsh ./scripts/build-pcct-deb.ps1 \
   -Version 0.2.3 \
   -KernelModule /path/to/usbdisplay.ko
-```
-
-目标机能够访问 APT 软件源时，只需下载生成的一个 `.deb`。必须使用 APT 安装，
-由其自动安装 `ffmpeg`、`libx264` 和其他动态库：
-
-```bash
-sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
 ```
 
 GitHub Actions 会在每次 push 和 pull request 时执行同一套 PCCT 打包流程，并上传

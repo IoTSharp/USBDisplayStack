@@ -11,6 +11,43 @@ stay in replaceable userspace backends.
 > working on Linux 4.15. The Actions Micro `185b:2d1d` live backend is
 > implemented but remains experimental and is not enabled by default.
 
+## Quick install
+
+The CI pipeline publishes one kernel-bound Debian package. Open
+[GitHub Actions](https://github.com/IoTSharp/USBDisplayStack/actions), select a
+successful `build` run, download the `usbdisplay-stack-deb-<version>` artifact,
+and extract its `.deb` file.
+
+The current CI package targets Linux `4.15.0-60-generic` and Debian `i386`.
+Confirm the target before installing:
+
+```bash
+uname -r
+dpkg --print-architecture
+```
+
+When those commands report `4.15.0-60-generic` and `i386`, install the single
+package through APT:
+
+```bash
+sudo apt install ./usbdisplay-stack_*+kernel.4.15.0-60-generic_i386.deb
+```
+
+APT automatically installs `ffmpeg`, `kmod`, `systemd`, `udev`, and compatible
+runtime libraries. Check the installed package and the current display state:
+
+```bash
+dpkg -s usbdisplay-stack
+usbdisplay-check --json
+```
+
+Installation intentionally does not load the kernel module or enable the
+service. An Actions Micro adapter also requires an authorized replay template;
+until that explicit activation is complete, `usbdisplay-check` reporting
+not-ready is expected. See the
+[Debian package and activation guide](docs/offline-deb.zh-CN.md) for the full
+procedure and offline-install option.
+
 ## Architecture
 
 ```text
@@ -149,7 +186,7 @@ dotnet run --project examples/csharp/Fbdev -- /dev/fb1
 dotnet run --project examples/csharp/Drm -- /dev/dri/card1
 ```
 
-## Install
+## Source install and packaging
 
 `scripts/install.sh` installs the module built for the running kernel,
 userspace binaries, backends, udev rules, and systemd files. It deliberately
@@ -170,14 +207,6 @@ the package in the PCCT image without bind-mounting the source tree:
 pwsh ./scripts/build-pcct-deb.ps1 \
   -Version 0.2.3 \
   -KernelModule /path/to/usbdisplay.ko
-```
-
-Only the resulting `.deb` is required on a network-connected target. Install
-it through APT so `ffmpeg`, `libx264`, and the remaining runtime libraries are
-resolved automatically:
-
-```bash
-sudo apt install ./usbdisplay-stack_0.2.3+kernel.4.15.0-60-generic_i386.deb
 ```
 
 GitHub Actions runs the same PCCT packaging path on every push and pull request.
