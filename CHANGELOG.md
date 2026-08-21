@@ -2,8 +2,7 @@
 
 ## Unreleased
 
-- Publish tagged Debian artifacts to the matching GitHub Release and mirror
-  them to GitHub Packages as a versioned GHCR OCI artifact.
+- Publish tagged Debian artifacts to the matching GitHub Release.
 - Render a redesigned connection-status splash with the project URL, support
   QQ, and PCCT-injected package version while no fbdev or DRM producer is open,
   and restore it when the last producer exits.

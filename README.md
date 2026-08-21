@@ -214,12 +214,11 @@ pwsh ./scripts/build-pcct-deb.ps1 \
 GitHub Actions runs the same PCCT packaging path on every push and pull request.
 It uploads the `.deb`, its SHA-256 sidecar, and the offline installer as a
 workflow artifact. A `vX.Y.Z` tag uses `X.Y.Z` and also publishes those files to
-the matching GitHub Release. The same tagged files are mirrored in GitHub
-Packages as the OCI artifact `ghcr.io/iotsharp/usbdisplaystack-deb:vX.Y.Z`;
-GitHub Packages does not provide a native Debian/APT package registry. The
-manual workflow dispatch can override the artifact version without publishing.
+the matching GitHub Release. GitHub Packages is not used because it does not
+provide a native Debian/APT package registry. The manual workflow dispatch can
+override the artifact version without publishing.
 Maintainers can instead set `release_tag` to an existing `vX.Y.Z` tag to rebuild
-that tag and recover its Release and Package assets.
+that tag and recover its Release assets.
 
 The package contains its Debian lifecycle hooks and all project installation
 scripts. It deliberately does not activate the module or select the physical

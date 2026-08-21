@@ -76,7 +76,6 @@ jobs:
     needs: kernel-4-15
     outputs:
       version: ${{ steps.version.outputs.version }}
-      source_revision: ${{ steps.version.outputs.source_revision }}
     env:
       KERNEL_RELEASE: 4.15.0-60-generic
       KERNEL_ARCHITECTURE: i386
@@ -128,7 +127,6 @@ jobs:
             *) ;;
           esac
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          printf 'source_revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           printf 'Building USBDisplayStack version %s\n' "$version"
 
       - name: Build and package with PCCT
@@ -175,7 +173,7 @@ jobs:
             dist-pcct/install-usbdisplay-offline.sh
 
   publish-tag:
-    name: publish tagged Debian package
+    name: publish tagged Debian release
     if: >-
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
       (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
@@ -183,13 +181,9 @@ jobs:
     needs: debian-package
     permissions:
       contents: write
-      packages: write
     env:
       GH_REPO: ${{ github.repository }}
-      OCI_PACKAGE: ghcr.io/iotsharp/usbdisplaystack-deb
-      PACKAGE_VERSION: ${{ needs.debian-package.outputs.version }}
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-      SOURCE_REVISION: ${{ needs.debian-package.outputs.source_revision }}
     steps:
       - name: Download Debian package
         uses: actions/download-artifact@v4
@@ -220,31 +214,3 @@ jobs:
               --generate-notes
           fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-
-      - name: Install ORAS
-        uses: oras-project/setup-oras@v1
-
-      - name: Publish Debian package to GitHub Packages
-        shell: bash
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          package=$(find dist-pcct -maxdepth 1 -type f -name '*.deb' -print -quit)
-          checksum="${package}.sha256"
-          installer=dist-pcct/install-usbdisplay-offline.sh
-          test -f "$package"
-          test -f "$checksum"
-          test -f "$installer"
-          printf '%s' "$GHCR_TOKEN" | oras login ghcr.io \
-            --username "$GITHUB_ACTOR" \
-            --password-stdin
-          oras push "$OCI_PACKAGE:$RELEASE_TAG" \
-            --artifact-type application/vnd.iotsharp.usbdisplaystack.debian.v1 \
-            --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --annotation "org.opencontainers.image.revision=$SOURCE_REVISION" \
-            --annotation "org.opencontainers.image.version=$PACKAGE_VERSION" \
-            --annotation "org.opencontainers.image.title=USBDisplayStack Debian package" \
-            "$package:application/vnd.debian.binary-package" \
-            "$checksum:text/plain" \
-            "$installer:application/vnd.iotsharp.usbdisplaystack.installer.v1+shell"

@@ -190,11 +190,10 @@ pwsh ./scripts/build-pcct-deb.ps1 \
 
 GitHub Actions 会在每次 push 和 pull request 时执行同一套 PCCT 打包流程，并上传
 `.deb`、SHA-256 校验文件和离线安装脚本作为 workflow artifact。推送 `vX.Y.Z`
-标签时使用 `X.Y.Z` 作为包版本，并把这三个文件上传到同名 GitHub Release；同时
-以 OCI artifact `ghcr.io/iotsharp/usbdisplaystack-deb:vX.Y.Z` 镜像到 GitHub
-Packages。GitHub Packages 本身不提供原生 Debian/APT 软件源类型。手动运行
-workflow 时只填写版本号不会发布；维护者也可以把 `release_tag` 设为已有的
-`vX.Y.Z` 标签，从该标签重建并恢复对应的 Release 和 Package 资产。
+标签时使用 `X.Y.Z` 作为包版本，并把这三个文件上传到同名 GitHub Release。
+GitHub Packages 不提供原生 Debian/APT 软件源类型，因此不用于发布 DEB。手动
+运行 workflow 时只填写版本号不会发布；维护者也可以把 `release_tag` 设为已有的
+`vX.Y.Z` 标签，从该标签重建并恢复对应的 Release 资产。
 
 DEB 已包含 Debian 生命周期脚本和项目的全部安装/卸载脚本。出于现场安全和
 replay 授权边界，安装后仍不会自动加载模块、选择实体后端或启动服务。离线安装、
