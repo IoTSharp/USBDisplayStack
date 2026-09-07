@@ -266,9 +266,8 @@ static void usbdisplay_producer_opened(struct usbdisplay_device *udev)
 
 static void usbdisplay_producer_closed(struct usbdisplay_device *udev)
 {
-	if (atomic_dec_and_test(&udev->producer_open)) {
-		usbdisplay_publish_initial(udev);
-	}
+	/* Keep the last fbdev snapshot for a reconnecting transport. */
+	(void)atomic_dec_and_test(&udev->producer_open);
 }
 
 static int usbdisplay_fbdev_open(struct fb_info *info, int user)

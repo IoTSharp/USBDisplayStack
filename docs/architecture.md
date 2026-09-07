@@ -48,7 +48,9 @@ structure sizes and an ABI version so fields can be appended without forcing
 unrelated backends to change.
 
 Backends may request a periodic `tick` callback. This keeps control traffic
-alive even when fbdev or DRM has not published a new frame.
+alive even when fbdev or DRM has not published a new frame. Physical backends
+never replace the current framebuffer image with a daemon splash during
+reconnect; the latest fbdev snapshot is replayed when the stream is reopened.
 
 The daemon publishes a readiness file after the backend opens. The file carries
 the live daemon PID, a positive transport `generation`, and `physical=1` only

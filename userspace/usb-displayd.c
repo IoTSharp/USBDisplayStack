@@ -269,9 +269,9 @@ static int validate_update(const struct usbdisplay_device_info *info,
 }
 
 static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
-			    const void *mapping,
-			    const struct usbdisplay_backend_v1 *backend,
-			    void *backend_context)
+		    const void *mapping,
+		    const struct usbdisplay_backend_v1 *backend,
+		    void *backend_context)
 {
 	struct pollfd descriptor;
 	struct usbdisplay_update update;
@@ -281,21 +281,25 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 	uint64_t now_ns = 0;
 	uint64_t last_submit_ns = 0;
 	uint32_t *splash_pixels = NULL;
-	size_t splash_bytes;
+	size_t splash_bytes = 0;
 	bool frame_valid = false;
+	bool physical_backend = (backend->capabilities &
+			USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0;
 	int result = 0;
 
-	/* INITIAL 只表示当前没有业务生产者，守护进程在实体链路就绪后替换为状态页。 */
-	splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
-	if (splash_bytes == 0) {
-		result = -EOVERFLOW;
-	} else {
-		splash_pixels = malloc(splash_bytes);
-		if (splash_pixels == NULL) {
-			result = -ENOMEM;
+	/* Physical output must preserve the current fb1 image during reconnects. */
+	if (!physical_backend) {
+		splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
+		if (splash_bytes == 0) {
+			result = -EOVERFLOW;
 		} else {
-			result = usbdisplay_splash_render(splash_pixels, info->width,
-						      info->height, info->width * 4U);
+			splash_pixels = malloc(splash_bytes);
+			if (splash_pixels == NULL) {
+				result = -ENOMEM;
+			} else {
+				result = usbdisplay_splash_render(splash_pixels, info->width,
+							      info->height, info->width * 4U);
+			}
 		}
 	}
 	descriptor.fd = device_fd;
@@ -317,7 +321,9 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 				result = -EPROTO;
 			} else {
 				result = validate_update(info, &update);
-				if (result == 0) {
+				if (result == 0 &&
+				    (update.source != USBDISPLAY_SOURCE_INITIAL ||
+				     !physical_backend)) {
 					memset(&frame, 0, sizeof(frame));
 					frame.struct_size = sizeof(frame);
 					if (update.source == USBDISPLAY_SOURCE_INITIAL) {
@@ -357,9 +363,7 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			result = -EIO;
 		}
 		now_ns = monotonic_nanoseconds();
-		/* 静止界面也每两秒重交最新帧，避免固件因长期无视频退回等待页。 */
-		if (result == 0 && frame_valid &&
-		    (backend->capabilities & USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0 &&
+		if (result == 0 && frame_valid && physical_backend &&
 		    now_ns >= last_submit_ns &&
 		    now_ns - last_submit_ns >= IDLE_FRAME_REFRESH_NS) {
 			result = backend->submit(backend_context, &frame);
@@ -371,7 +375,6 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 		    (backend->capabilities & USBDISPLAY_BACKEND_CAP_TICK) != 0 &&
 		    backend->struct_size >= USBDISPLAY_BACKEND_V1_TICK_SIZE &&
 		    backend->tick != NULL) {
-			/* submit 可能发送心跳，tick 必须使用提交完成后的时间记录设备响应。 */
 			now_ns = monotonic_nanoseconds();
 			result = backend->tick(backend_context, now_ns);
 		}
@@ -380,7 +383,6 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 
 	return result;
 }
-
 int main(int argc, char **argv)
 {
 	const char *device_path;
