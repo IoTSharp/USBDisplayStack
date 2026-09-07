@@ -263,3 +263,59 @@ equivalent automated fault shows the daemon incrementing `generation`,
 returning to a ready state, sending heartbeats, delivering retained and new
 HDMI frames, and the physical display visibly returning to stable live output
 without a manual unplug/replug.
+
+## 2026-09-07 lane 179 startup-splash validation
+
+The operator authorized diagnosis, deployment, restart, and physical USB tests
+on `192.168.137.179`. Its primary framebuffer is `fb0=inteldrmfb`; the USB
+second screen is `fb1=usbdisplay`. The second-screen application uses
+`--framebuffer /dev/fb1`.
+
+The kernel recorded a real USB disconnect at 14:57:05 CST and new device
+numbers at 14:57:18 and 14:57:20. After the startup-splash fix was deployed,
+the daemon logged a successful backend submission at 15:09:26. The operator
+still saw the UGREEN connecting page. Neither the real re-enumeration nor this
+submission proves physical display recovery in this incident.
+
+The installed `/var/lib/usbdisplay/actions-micro.replay` is 633,264 bytes,
+with SHA-256
+`f4769abebc7a34b65ec53270ef188f85e0b0da0572da7e47b445e705d113fe1e`.
+It contains 17 command reports and 137 video reports over 4.565229 seconds,
+ending at command sequence 16 and video sequence 92. Its 154-record size
+matches the later successful live-backend test in `testing.md`; the earlier
+1,251-record capture is a different sample. The record-count difference alone
+does not establish a damaged template.
+
+Later in the same daemon session, a bounded read of input0 returned 511-byte reports
+with a 39-byte payload. Only the outer sequence changed in the two samples:
+
+```text
+02 01 00 00 c2 03 00 00 01 00 00 00 27 00 27 00
+00 00 43 4e 59 53 c6 23 ff ff 03 00 00 00 ...
+```
+
+| Direction / Payload Tag (Little Endian) | Observation | Unconfirmed Meaning |
+| --- | --- | --- |
+| Device to host / `0x50494e47` (`PING`) | Earlier 24-byte control payloads | Video acceptance or presentation |
+| Device to host / `0x53594e43` (`SYNC`) | Repeated 39-byte control payloads in this incident | Required response, session fields, or video state |
+| Host to device / `0x53594e43` (`SYNC`) | Three fixed 24-byte payloads at the start of the template | Relationship to the live device's reply |
+
+The template's first three host `SYNC` payloads are identical:
+
+```text
+18 00 00 00 43 4e 59 53 29 00 ff ff 03 00 00 00
+01 00 01 80 00 00 00 00
+```
+
+The backend currently counts device inputs without interpreting their payloads.
+Do not infer an ACK format or send guessed responses from the tag alone. A
+successful bidirectional capture or the vendor's protocol implementation is
+needed to establish the expected handshake and compare it with this stalled
+session. The bounded sample can be
+reproduced after verifying the current input0 node (the output is truncated to
+exclude the serial-number field):
+
+```bash
+timeout 8s dd if=/dev/hidraw0 bs=511 count=2 status=none |
+  od -An -v -tx1 -w511 | cut -c1-90
+```
