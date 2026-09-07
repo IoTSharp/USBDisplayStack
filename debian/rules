@@ -41,6 +41,8 @@ override_dh_auto_install:
 		$(PACKAGE_DIR)/usr/bin/usbdisplay-drm-probe
 	install -m 0755 tools/usbdisplay-check \
 		$(PACKAGE_DIR)/usr/bin/usbdisplay-check
+	install -m 0755 tools/usbdisplay-load \
+		$(PACKAGE_DIR)/usr/bin/usbdisplay-load
 	install -m 0755 build/usbdisplay-null.so build/usbdisplay-ppm.so \
 		build/usbdisplay-actions-micro.so $(PACKAGE_DIR)/usr/lib/usbdisplay/
 	install -m 0644 packaging/usb-displayd.default \

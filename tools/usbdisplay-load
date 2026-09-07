@@ -1,0 +1,82 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+set -eu
+
+sysfs_graphics=/sys/class/graphics
+fb0_name_path=$sysfs_graphics/fb0/name
+fb1_name_path=$sysfs_graphics/fb1/name
+fb1_device=/dev/fb1
+stream_device=/dev/usbdisplay0
+
+fail()
+{
+	printf 'usbdisplay-load: %s\n' "$*" >&2
+	exit 1
+}
+
+read_name()
+{
+	tr -d '\r\n' < "$1"
+}
+
+is_transition_name()
+{
+	case "$1" in
+		*VESA*|*vesa*|*EFI*|*efi*|*simple*|*Simple*|*firmware*|*Firmware*)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ -r "$fb0_name_path" ] || fail 'fb0 is not registered'
+
+fb0_name=$(read_name "$fb0_name_path")
+[ -n "$fb0_name" ] || fail 'fb0 has no registered name'
+[ "$fb0_name" != usbdisplay ] || fail 'fb0 is already owned by usbdisplay'
+if is_transition_name "$fb0_name"; then
+	fail "fb0 is still a firmware transition framebuffer ($fb0_name)"
+fi
+
+fb0_driver_path=$sysfs_graphics/fb0/device/driver
+if [ -e "$fb0_driver_path" ]; then
+	fb0_driver=$(basename "$(readlink -f "$fb0_driver_path")")
+	case "$fb0_driver" in
+		efi-framebuffer|simple-framebuffer|simpledrm|vesa|vesafb)
+			fail "fb0 is still using transition driver $fb0_driver"
+			;;
+	esac
+else
+	fail 'fb0 driver is not registered'
+fi
+
+if [ -e "$sysfs_graphics/fb1" ]; then
+	[ -r "$fb1_name_path" ] || fail 'fb1 sysfs entry has no name'
+	fb1_name=$(read_name "$fb1_name_path")
+	[ "$fb1_name" = usbdisplay ] ||
+		fail "fb1 is occupied by $fb1_name"
+elif [ -e "$fb1_device" ]; then
+	fail 'fb1 device exists without a matching sysfs entry'
+fi
+
+if [ ! -e "$sysfs_graphics/fb1" ]; then
+	command -v modprobe >/dev/null 2>&1 || fail 'modprobe is not installed'
+	modprobe usbdisplay || fail 'modprobe usbdisplay failed'
+	# A deferred platform probe can be retried once without unloading an active module.
+	if [ ! -e "$sysfs_graphics/fb1" ] &&
+		[ -w /sys/bus/platform/drivers_probe ]; then
+		printf '%s\n' usbdisplay.0 > /sys/bus/platform/drivers_probe || true
+	fi
+fi
+
+[ -r "$fb1_name_path" ] || fail 'usbdisplay did not register fb1'
+[ "$(read_name "$fb1_name_path")" = usbdisplay ] ||
+	fail 'fb1 is not named usbdisplay'
+[ -c "$fb1_device" ] || fail 'fb1 is not a character device'
+[ -c "$stream_device" ] || fail 'usbdisplay0 is not a character device'
+
+printf 'usbdisplay-load: fb0=%s fb1=usbdisplay nodes=ready\n' "$fb0_name"

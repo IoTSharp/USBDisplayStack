@@ -62,7 +62,8 @@ for required_file in \
 	"$build_dir/usbdisplay-ppm.so" \
 	"$build_dir/usbdisplay-actions-micro.so" \
 	"$kernel_module" \
-	"$project_dir/tools/usbdisplay-check"; do
+	"$project_dir/tools/usbdisplay-check" \
+	"$project_dir/tools/usbdisplay-load"; do
 	if [ ! -f "$required_file" ]; then
 		printf 'Missing build artifact: %s\n' "$required_file" >&2
 		exit 1
@@ -127,6 +128,8 @@ install -m 0755 "$build_dir/drm-probe" \
 	"$package_root/usr/bin/usbdisplay-drm-probe"
 install -m 0755 "$project_dir/tools/usbdisplay-check" \
 	"$package_root/usr/bin/usbdisplay-check"
+install -m 0755 "$project_dir/tools/usbdisplay-load" \
+	"$package_root/usr/bin/usbdisplay-load"
 install -m 0755 "$build_dir/usbdisplay-null.so" \
 	"$package_root/usr/lib/usbdisplay/usbdisplay-null.so"
 install -m 0755 "$build_dir/usbdisplay-ppm.so" \

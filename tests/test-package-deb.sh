@@ -74,6 +74,7 @@ dpkg-deb -c "$package_file" > "$package_contents"
 grep -q "./lib/modules/$kernel_release/extra/usbdisplay.ko" \
 	"$package_contents"
 grep -q './usr/bin/usbdisplay-check' "$package_contents"
+grep -q './usr/bin/usbdisplay-load' "$package_contents"
 grep -q './lib/systemd/system/usb-displayd.service' "$package_contents"
 grep -q './usr/share/doc/usbdisplay-stack/docs/assets/usbdisplay-splash.png' \
 	"$package_contents"

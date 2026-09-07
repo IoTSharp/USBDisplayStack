@@ -163,9 +163,11 @@ kill "$daemon_pid"
 sudo rmmod usbdisplay
 ```
 
-这里的 `/dev/fb1` 和 `/dev/dri/card1` 只是示例编号。实际脚本应通过 sysfs 中
-名为 `usbdisplay` 的 framebuffer，或 DRM 驱动名称来发现设备，不能假定节点
-编号固定。
+部署约束固定为：原始显示驱动必须先占用 `/dev/fb0`，USBDisplayStack 只能占用
+真实的 `/dev/fb1`；主程序使用 fb0，二屏程序使用 fb1。`usbdisplay-load` 会拒绝
+固件过渡 framebuffer、已经被其他驱动占用的 fb1，以及任何编号不符合要求的注册。
+`/dev/dri/card1` 仅表示同一 USB 虚拟 DRM 设备的接口，不能用改变节点编号来绕过
+fb0/fb1 约束。
 
 需要安装到系统时，可以运行：
 

@@ -18,6 +18,7 @@ examples-lvgl:
 
 check:
 	sh tests/test-usbdisplay-check.sh
+	sh tests/test-usbdisplay-load.sh
 	sh tests/test-package-deb.sh
 	sh tests/test-splash-preview.sh
 

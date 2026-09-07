@@ -22,6 +22,7 @@ rm -f \
 	/usr/bin/usbdisplay-fb-test-pattern \
 	/usr/bin/usbdisplay-drm-probe \
 	/usr/bin/usbdisplay-check \
+	/usr/bin/usbdisplay-load \
 	/usr/lib/usbdisplay/usbdisplay-null.so \
 	/usr/lib/usbdisplay/usbdisplay-ppm.so \
 	/usr/lib/usbdisplay/usbdisplay-actions-micro.so \

@@ -31,6 +31,8 @@ install -m 0755 "$project_dir/build/drm-probe" \
 	/usr/bin/usbdisplay-drm-probe
 install -m 0755 "$project_dir/tools/usbdisplay-check" \
 	/usr/bin/usbdisplay-check
+install -m 0755 "$project_dir/tools/usbdisplay-load" \
+	/usr/bin/usbdisplay-load
 install -m 0755 "$project_dir/build/usbdisplay-null.so" \
 	/usr/lib/usbdisplay/usbdisplay-null.so
 install -m 0755 "$project_dir/build/usbdisplay-ppm.so" \

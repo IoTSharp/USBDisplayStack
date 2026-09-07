@@ -829,23 +829,60 @@ static void usbdisplay_fbdev_unregister(void *data)
 	framebuffer_release(info);
 }
 
+/* Older kernels expose the fbdev class; newer kernels require the loader gate. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+static int usbdisplay_match_fbdev(struct device *device, const void *name)
+{
+	return strcmp(dev_name(device), name) == 0;
+}
+#endif
+
+static int usbdisplay_check_fbdev_slot(struct device *device)
+{
+	int result = 0;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+	struct device *primary;
+	struct device *secondary;
+
+	/* The physical primary must own fb0 before the virtual device is probed. */
+	primary = class_find_device(fb_class, NULL, "fb0", usbdisplay_match_fbdev);
+	secondary = class_find_device(fb_class, NULL, "fb1", usbdisplay_match_fbdev);
+	if (primary == NULL) {
+		dev_info(device, "waiting for the primary framebuffer fb0\n");
+		result = -EPROBE_DEFER;
+	} else if (secondary != NULL) {
+		dev_err(device, "fb1 is already occupied; refusing another framebuffer index\n");
+		result = -EBUSY;
+	}
+	put_device(secondary);
+	put_device(primary);
+#else
+	(void)device;
+#endif
+
+	return result;
+}
+
 static int usbdisplay_register_fbdev(struct device *device,
 				     struct usbdisplay_device *udev)
 {
 	struct fb_info *info = NULL;
 	unsigned int stride = width * (USBDISPLAY_FB_BPP / 8);
-	int result = 0;
+	int result = usbdisplay_check_fbdev_slot(device);
 
 	udev->fb_bytes = PAGE_ALIGN((size_t)stride * height);
-	udev->fb_memory = vzalloc(udev->fb_bytes);
-	if (udev->fb_memory == NULL) {
-		result = -ENOMEM;
-	} else {
-		result = devm_add_action(device, usbdisplay_vfree,
-					 udev->fb_memory);
-		if (result != 0) {
-			vfree(udev->fb_memory);
-			udev->fb_memory = NULL;
+	if (result == 0) {
+		udev->fb_memory = vzalloc(udev->fb_bytes);
+		if (udev->fb_memory == NULL) {
+			result = -ENOMEM;
+		} else {
+			result = devm_add_action(device, usbdisplay_vfree,
+						 udev->fb_memory);
+			if (result != 0) {
+				vfree(udev->fb_memory);
+				udev->fb_memory = NULL;
+			}
 		}
 	}
 
@@ -895,6 +932,13 @@ static int usbdisplay_register_fbdev(struct device *device,
 			fb_deferred_io_init(info);
 			usbdisplay_fbdev_ops.fb_mmap = usbdisplay_fbdev_mmap;
 			result = register_framebuffer(info);
+			/* fbdev chooses the slot: reject a race before publishing the stream. */
+			if (result == 0 && info->node != 1) {
+				dev_err(device, "assigned fb%d instead of fb1; refusing registration\n",
+					info->node);
+				unregister_framebuffer(info);
+				result = -EBUSY;
+			}
 			if (result != 0) {
 				fb_deferred_io_cleanup(info);
 				framebuffer_release(info);
