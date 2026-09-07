@@ -61,6 +61,13 @@ by the daemon's pixel renderer, independently of LVGL. Sending it still requires
 a working physical video session; it cannot replace the adapter's firmware page
 when the firmware has not accepted video.
 
+The Actions Micro backend negotiates SGUP v3 local and remote session IDs
+before initialization. Those IDs are included in every command, heartbeat,
+and first video fragment; a captured session ID is never treated as fixed
+protocol magic. Matching device replies confirm synchronization, and a changed
+device session causes a backend reopen and latest-frame delivery. The default
+command-only bootstrap avoids displaying video captured in the replay template.
+
 The daemon publishes a readiness file after the backend opens. The file carries
 the live daemon PID, a positive transport `generation`, and `physical=1` only
 for a backend that owns a physical display transport; diagnostic backends

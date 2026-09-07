@@ -120,8 +120,6 @@ static int run_case(const struct usbdisplay_backend_v1 *backend,
 		stop_requested = 0;
 		result = write_updates(descriptors[1], updates, update_count);
 		if (result == 0) {
-			close(descriptors[1]);
-			descriptors[1] = -1;
 			result = run_loop(descriptors[0], &info, mapping, backend, capture);
 		}
 	}
@@ -150,6 +148,7 @@ static int test_cases(void)
 	struct capture_context capture;
 	const struct usbdisplay_backend_v1 *backend;
 	size_t splash_bytes;
+	uint64_t started_ns;
 	int result = 0;
 	unsigned int index;
 
@@ -176,6 +175,20 @@ static int test_cases(void)
 	}
 
 	if (result == 0) {
+		fill_update(&updates[0], USBDISPLAY_SOURCE_INITIAL, 1U);
+		started_ns = monotonic_nanoseconds();
+		result = run_case(&capture_backend, updates, 1U, mapping,
+				 sizeof(mapping), 3U, &capture);
+		if (result == 0 && (capture.frames != 3U ||
+			monotonic_nanoseconds() - started_ns > 1000000000ULL ||
+			capture.captured[2].source != USBDISPLAY_SOURCE_INITIAL ||
+			!frame_matches(&capture.captured[2], (const unsigned char *)splash,
+				       splash_bytes))) {
+			result = -EINVAL;
+		}
+	}
+
+	if (result == 0) {
 		fill_update(&updates[0], USBDISPLAY_SOURCE_INITIAL, 2U);
 		fill_update(&updates[1], USBDISPLAY_SOURCE_FBDEV, 3U);
 		result = run_case(&capture_backend, updates, 2U, mapping,
@@ -191,10 +204,10 @@ static int test_cases(void)
 	if (result == 0) {
 		fill_update(&updates[0], USBDISPLAY_SOURCE_DRM, 4U);
 		result = run_case(&capture_backend, updates, 1U, mapping,
-				sizeof(mapping), 1U, &capture);
-		if (result == 0 && (capture.frames != 1U ||
-			capture.captured[0].source != USBDISPLAY_SOURCE_DRM ||
-			!frame_matches(&capture.captured[0], mapping,
+				 sizeof(mapping), 2U, &capture);
+		if (result == 0 && (capture.frames != 2U ||
+			capture.captured[1].source != USBDISPLAY_SOURCE_DRM ||
+			!frame_matches(&capture.captured[1], mapping,
 				       32U * 16U * 4U))) {
 			result = -EINVAL;
 		}
@@ -203,10 +216,10 @@ static int test_cases(void)
 	if (result == 0) {
 		fill_update(&updates[0], USBDISPLAY_SOURCE_FBDEV, 5U);
 		result = run_case(&capture_backend, updates, 1U, mapping,
-				sizeof(mapping), 1U, &capture);
-		if (result == 0 && (capture.frames != 1U ||
-			capture.captured[0].source != USBDISPLAY_SOURCE_FBDEV ||
-			!frame_matches(&capture.captured[0], mapping,
+				 sizeof(mapping), 2U, &capture);
+		if (result == 0 && (capture.frames != 2U ||
+			capture.captured[1].source != USBDISPLAY_SOURCE_FBDEV ||
+			!frame_matches(&capture.captured[1], mapping,
 				       32U * 16U * 4U))) {
 			result = -EINVAL;
 		}

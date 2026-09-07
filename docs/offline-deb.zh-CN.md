@@ -82,11 +82,15 @@ replay 必须来自有权使用的参考设备，不得提交到仓库。下面�
 sudo sh ./install-usbdisplay-offline.sh \
   --backend actions-micro \
   --template ./actions-micro.replay \
-  --bootstrap full \
+  --bootstrap none \
   --width 1920 --height 1080 \
   --enable \
   ./usbdisplay-stack_0.2.4+kernel.4.15.0-60-generic_i386.deb
 ```
+
+默认的 `--bootstrap none` 会协商当前设备会话，仅使用模板中的初始化命令和心跳，
+随后发送当前 fb1 内容；`minimal` 是兼容别名。`full` 只用于显式回放诊断，会发送
+模板里录制的历史视频，不应用于正常第二屏显示。
 
 安装脚本把 replay 以 `0600` 权限放到
 `/var/lib/usbdisplay/actions-micro.replay`。如果服务未能在超时时间内打开

@@ -25,6 +25,7 @@
 #define DEFAULT_BACKEND_RETRY_MS 2000U
 #define DEFAULT_READY_FILE "/run/usbdisplay/ready"
 #define IDLE_FRAME_REFRESH_NS 2000000000ULL
+#define STARTUP_FRAME_INTERVAL_MS 33
 
 static volatile sig_atomic_t stop_requested;
 
@@ -102,7 +103,7 @@ static int parse_arguments(int argc, char **argv, const char **device_path,
 	return result;
 }
 
-/* 物理后端断开时保持一个进程等待，避免 systemd 每两秒重复创建守护进程。 */
+/* Keep one daemon alive across physical disconnects for systemd. */
 static int sleep_milliseconds(unsigned int milliseconds)
 {
 	struct timespec delay;
@@ -143,7 +144,7 @@ static int write_all(int descriptor, const char *buffer, size_t length)
 	return result;
 }
 
-/* 就绪文件同时携带 PID 和传输代数，副屏可识别快速重连并拒绝陈旧标记。 */
+/* Readiness records PID and generation for reconnect validation. */
 static int publish_ready_file(const char *ready_file, const char *backend_name,
 			      bool physical, unsigned long long generation)
 {
@@ -202,7 +203,7 @@ static void remove_ready_file(const char *ready_file)
 	}
 }
 
-/* 后端重开后先释放旧 mmap 再 close/open 帧流，避免映射引用使内核返回 EBUSY。 */
+/* Release the old mapping before reopening the stream. */
 static int reopen_frame_stream(const char *device_path, size_t map_bytes,
 			       int *device_fd, void **mapping)
 {
@@ -280,9 +281,12 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 	int poll_result;
 	uint64_t now_ns = 0;
 	uint64_t last_submit_ns = 0;
+	uint64_t refresh_interval_ns;
+	int poll_interval_ms;
 	uint32_t *splash_pixels = NULL;
 	size_t splash_bytes = 0;
 	bool frame_valid = false;
+	bool startup_splash_submitted = false;
 	bool physical_backend = (backend->capabilities &
 			USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0;
 	int result = 0;
@@ -300,11 +304,44 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 						      info->height, info->width * 4U);
 		}
 	}
+	/*
+	 * The kernel stream retains only its newest update. By the time the
+	 * daemon reads it, INITIAL may already have been replaced by fbdev.
+	 * Submit the splash at generation start so reconnects do not depend on
+	 * that marker surviving the race.
+	 */
+	if (result == 0) {
+		memset(&frame, 0, sizeof(frame));
+		frame.struct_size = sizeof(frame);
+		frame.pixels = splash_pixels;
+		frame.bytes = splash_bytes;
+		frame.sequence = 0;
+		frame.timestamp_ns = monotonic_nanoseconds();
+		frame.width = info->width;
+		frame.height = info->height;
+		frame.stride = info->width * 4U;
+		frame.format = USBDISPLAY_FORMAT_XRGB8888;
+		frame.source = USBDISPLAY_SOURCE_INITIAL;
+		frame.damage_width = info->width;
+		frame.damage_height = info->height;
+		result = backend->submit(backend_context, &frame);
+		if (result == 0) {
+			startup_splash_submitted = true;
+			frame_valid = true;
+			last_submit_ns = monotonic_nanoseconds();
+			fprintf(stderr,
+				"usb-displayd: startup splash submitted at generation start\n");
+		}
+	}
 	descriptor.fd = device_fd;
 	descriptor.events = POLLIN;
 	descriptor.revents = 0;
 	while (!stop_requested && result == 0) {
-		poll_result = poll(&descriptor, 1, BACKEND_TICK_INTERVAL_MS);
+		/* Keep startup video flowing while the adapter's decoder warms up. */
+		poll_interval_ms = frame_valid && physical_backend &&
+			frame.source == USBDISPLAY_SOURCE_INITIAL ?
+			STARTUP_FRAME_INTERVAL_MS : BACKEND_TICK_INTERVAL_MS;
+		poll_result = poll(&descriptor, 1, poll_interval_ms);
 		if (poll_result < 0) {
 			if (errno != EINTR) {
 				result = -errno;
@@ -320,6 +357,12 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			} else {
 				result = validate_update(info, &update);
 				if (result == 0) {
+					uint32_t previous_source = frame.source;
+					if (update.source == USBDISPLAY_SOURCE_INITIAL &&
+					    startup_splash_submitted) {
+						/* The generation-start splash already represents INITIAL. */
+						continue;
+					}
 					memset(&frame, 0, sizeof(frame));
 					frame.struct_size = sizeof(frame);
 					if (update.source == USBDISPLAY_SOURCE_INITIAL) {
@@ -354,6 +397,12 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 							fprintf(stderr,
 								"usb-displayd: startup splash submitted to backend\n");
 						}
+						if (frame_valid && previous_source != update.source) {
+							fprintf(stderr,
+								"usb-displayd: frame source transition %u -> %u sequence=%llu\n",
+								previous_source, update.source,
+								(unsigned long long)update.sequence);
+						}
 						frame_valid = true;
 						last_submit_ns = monotonic_nanoseconds();
 					}
@@ -364,9 +413,13 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			result = -EIO;
 		}
 		now_ns = monotonic_nanoseconds();
+		refresh_interval_ns = frame_valid &&
+			frame.source == USBDISPLAY_SOURCE_INITIAL ?
+			(uint64_t)STARTUP_FRAME_INTERVAL_MS * 1000000ULL :
+			IDLE_FRAME_REFRESH_NS;
 		if (result == 0 && frame_valid && physical_backend &&
 		    now_ns >= last_submit_ns &&
-		    now_ns - last_submit_ns >= IDLE_FRAME_REFRESH_NS) {
+		    now_ns - last_submit_ns >= refresh_interval_ns) {
 			result = backend->submit(backend_context, &frame);
 			if (result == 0) {
 				last_submit_ns = monotonic_nanoseconds();
@@ -406,7 +459,7 @@ int main(int argc, char **argv)
 	unsigned int retry_count = 0U;
 	unsigned long long reopen_count = 0ULL;
 	unsigned long long generation = 1ULL;
-	/* 仅统计 run_loop 报告传输丢失之后完整成功的重开。 */
+	/* Count only completed reopens after run_loop reports transport loss. */
 	bool reopen_pending = false;
 
 	result = parse_arguments(argc, argv, &device_path, &backend_path,
@@ -486,7 +539,7 @@ int main(int argc, char **argv)
 			backend_context = NULL;
 			open_stage = "backend";
 			open_result = backend->open(&backend_config, &backend_context);
-			/* 后端重开完成后再重开帧流，使首个 poll 立即收到内核保留的最新帧。 */
+			/* Reopen the stream after backend recovery so the first poll sees the latest frame. */
 			if (open_result == 0 && reopen_pending) {
 				open_stage = "frame stream";
 				open_result = reopen_frame_stream(device_path,

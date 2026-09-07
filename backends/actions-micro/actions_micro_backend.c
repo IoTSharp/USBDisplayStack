@@ -53,6 +53,11 @@
 #define USB_RESET_MIN_INTERVAL_NS 60000000000ULL
 #define USB_SYSFS_DEVICES "/sys/bus/usb/devices"
 #define USB_DEVICE_NODE_LENGTH 64U
+#define SESSION_UNKNOWN UINT16_MAX
+#define SESSION_SYNC_TIMEOUT_NS 5000000000ULL
+#define SESSION_SYNC_RETRY_NS 500000000ULL
+#define MAX_SESSION_SYNC_POLLS 100U
+#define MAX_SESSION_SYNC_SENDS 12U
 
 #define VIDEO_CONFIG 0x800U
 #define VIDEO_IDR 0x200U
@@ -119,6 +124,12 @@ struct actions_context {
 	uint32_t video_sequence;
 	uint64_t video_report_index;
 	uint8_t next_command_endpoint;
+	uint16_t local_session;
+	uint16_t remote_session;
+	uint16_t acked_remote_session;
+	bool peer_confirmed;
+	bool session_confirmed;
+	bool sync_reply_pending;
 	uint64_t frames;
 	uint64_t reports;
 	/* 输入与复位状态把无声会话掉线纳入可观测、可恢复的路径。 */
@@ -189,6 +200,99 @@ static void write_le32(unsigned char *data, uint32_t value)
 	data[1] = (unsigned char)(value >> 8);
 	data[2] = (unsigned char)(value >> 16);
 	data[3] = (unsigned char)(value >> 24);
+}
+
+/* SGUP v3 carries two negotiated session IDs, not a fixed protocol magic. */
+static bool rewrite_report_session(unsigned char report[HID_REPORT_LENGTH],
+				   uint16_t local_session, uint16_t remote_session)
+{
+	unsigned char *payload = report + HID_HEADER_LENGTH;
+	uint32_t fragments = read_le32(report + 8);
+	uint16_t bytes = read_le16(report + 12);
+
+	if ((report[1] != 1 && report[1] != 2) ||
+	    (fragments & 0xffffU) == 0 || (fragments >> 16) != 0 ||
+	    bytes < 16U || bytes > HID_PAYLOAD_LENGTH ||
+	    (memcmp(payload + 4, "CNYS", 4) != 0 &&
+	     memcmp(payload + 4, "_PPA", 4) != 0 &&
+	     memcmp(payload + 4, "RRIM", 4) != 0 &&
+	     memcmp(payload + 4, "GNIP", 4) != 0)) {
+		return false;
+	}
+	write_le16(payload + 8, local_session);
+	write_le16(payload + 10, remote_session);
+	return true;
+}
+
+/* A matching video request can acknowledge SYNC without a separate SYNC echo. */
+static int consume_sync_report(struct actions_context *state,
+			       const unsigned char *report, size_t report_bytes)
+{
+	const unsigned char *payload;
+	uint16_t payload_bytes;
+	uint16_t remote_session;
+	uint16_t echoed_session;
+
+	if (report_bytes < HID_HEADER_LENGTH + 16U || report[1] != 1 ||
+	    read_le32(report + 8) != 1U) {
+		return 0;
+	}
+	payload_bytes = read_le16(report + 12);
+	payload = report + HID_HEADER_LENGTH;
+	if (payload_bytes < 16U || payload_bytes > report_bytes - HID_HEADER_LENGTH ||
+	    read_le32(payload) != payload_bytes ||
+	    read_le32(payload + 12) != 3U) {
+		return 0;
+	}
+	remote_session = read_le16(payload + 8);
+	echoed_session = read_le16(payload + 10);
+	if (memcmp(payload + 4, "CNYS", 4) != 0) {
+		if (!state->session_confirmed && remote_session != SESSION_UNKNOWN &&
+		    remote_session == state->remote_session &&
+		    state->acked_remote_session == remote_session &&
+		    echoed_session == state->local_session &&
+		    (memcmp(payload + 4, "RRIM", 4) == 0 ||
+		     memcmp(payload + 4, "_PPA", 4) == 0 ||
+		     memcmp(payload + 4, "GNIP", 4) == 0)) {
+			state->peer_confirmed = true;
+			state->session_confirmed = true;
+			fprintf(stderr,
+				"actions-micro: session peer acknowledged type=%.4s "
+				"local=%04x remote=%04x\n", payload + 4,
+				state->local_session, state->remote_session);
+		}
+		return 0;
+	}
+	if (payload_bytes < 24U) {
+		return 0;
+	}
+	if (remote_session == SESSION_UNKNOWN) {
+		return 0;
+	}
+	if (state->session_confirmed) {
+		if (remote_session != state->remote_session ||
+		    echoed_session != state->local_session) {
+			fprintf(stderr,
+				"actions-micro: firmware session changed local=%04x "
+				"remote=%04x received=%04x:%04x; renegotiating\n",
+				state->local_session, state->remote_session,
+				remote_session, echoed_session);
+			return -ESTALE;
+		}
+		return 0;
+	}
+	if (state->remote_session != remote_session) {
+		state->remote_session = remote_session;
+		state->acked_remote_session = SESSION_UNKNOWN;
+		state->sync_reply_pending = true;
+	}
+	state->peer_confirmed = echoed_session == state->local_session;
+	if (!state->peer_confirmed) {
+		state->sync_reply_pending = true;
+	}
+	state->session_confirmed = state->peer_confirmed &&
+		state->acked_remote_session == remote_session;
+	return 0;
 }
 
 static int find_actions_micro_usb_node(
@@ -942,16 +1046,20 @@ static void log_ffmpeg_pipe_error(const char *operation, int descriptor,
 static int send_report(struct actions_context *state, uint8_t endpoint,
 		       const unsigned char data[HID_REPORT_LENGTH])
 {
+	unsigned char report[HID_REPORT_LENGTH];
 	int descriptor = -1;
 	int result = -EPROTO;
 
+	memcpy(report, data, sizeof(report));
+	(void)rewrite_report_session(report, state->local_session,
+				     state->remote_session);
 	if (endpoint == 0x03) {
 		descriptor = state->hid[0];
 	} else if (endpoint == 0x04) {
 		descriptor = state->hid[1];
 	}
 	if (descriptor >= 0) {
-		result = write_all_logged(descriptor, data, HID_REPORT_LENGTH, "hid");
+		result = write_all_logged(descriptor, report, HID_REPORT_LENGTH, "hid");
 		if (result == 0) {
 			++state->reports;
 		} else {
@@ -986,25 +1094,38 @@ static void advance_transport_state(struct actions_context *state,
 	}
 }
 
+static bool is_sync_report(const unsigned char data[HID_REPORT_LENGTH])
+{
+	return data[1] == 1 && read_le32(data + 8) == 1U &&
+	       read_le16(data + 12) >= 24U &&
+	       memcmp(data + HID_HEADER_LENGTH + 4, "CNYS", 4) == 0;
+}
+
 static int send_initialization(struct actions_context *state)
 {
 	uint64_t start_ns = monotonic_nanoseconds();
+	unsigned char report[HID_REPORT_LENGTH];
 	size_t index;
 	int result = 0;
 
 	for (index = 0; index < state->initialization_count && result == 0;
 	     ++index) {
+		if (is_sync_report(state->initialization[index].data)) {
+			continue;
+		}
+		memcpy(report, state->initialization[index].data, sizeof(report));
+		write_le32(report + 4, state->command_sequence);
 		result = sleep_until_ns(start_ns +
 			state->initialization[index].timestamp_us * 1000ULL);
 		if (result == 0) {
 			result = send_report(state,
 				state->initialization[index].endpoint,
-				state->initialization[index].data);
+				report);
 		}
 		if (result == 0) {
 			advance_transport_state(state,
 				state->initialization[index].endpoint,
-				state->initialization[index].data);
+				report);
 		}
 	}
 
@@ -1014,21 +1135,30 @@ static int send_initialization(struct actions_context *state)
 static int send_full_bootstrap(struct actions_context *state)
 {
 	uint64_t start_ns = monotonic_nanoseconds();
+	unsigned char report[HID_REPORT_LENGTH];
 	size_t index;
 	int result = 0;
 
 	for (index = 0; index < state->bootstrap_count && result == 0;
 	     ++index) {
+		/* Captured SYNC belongs to a past session; negotiation replaced it. */
+		if (is_sync_report(state->bootstrap[index].data)) {
+			continue;
+		}
+		memcpy(report, state->bootstrap[index].data, sizeof(report));
+		if (report[1] == 1) {
+			write_le32(report + 4, state->command_sequence);
+		}
 		result = sleep_until_ns(start_ns +
 			state->bootstrap[index].timestamp_us * 1000ULL);
 		if (result == 0) {
 			result = send_report(state, state->bootstrap[index].endpoint,
-					     state->bootstrap[index].data);
+					     report);
 		}
 		if (result == 0) {
 			advance_transport_state(state,
 				state->bootstrap[index].endpoint,
-				state->bootstrap[index].data);
+					report);
 		}
 	}
 
@@ -1205,6 +1335,8 @@ static int poll_hid_inputs(struct actions_context *state, uint64_t now_ns)
 				bytes_read = read(descriptors[index].fd, report,
 						  sizeof(report));
 				if (bytes_read > 0) {
+					result = consume_sync_report(state, report,
+								     (size_t)bytes_read);
 					state->last_input_ns = now_ns;
 					++state->input_reports;
 					++state->input_reports_by_endpoint[index];
@@ -1232,6 +1364,74 @@ static int poll_hid_inputs(struct actions_context *state, uint64_t now_ns)
 			strerror(-result));
 	}
 
+	return result;
+}
+
+/* Both peers must advertise each other's ID before captured commands or video. */
+static int send_sync_report(struct actions_context *state)
+{
+	unsigned char report[HID_REPORT_LENGTH] = {0};
+	unsigned char *payload = report + HID_HEADER_LENGTH;
+	uint8_t endpoint = state->next_command_endpoint;
+	int result;
+
+	report[0] = endpoint == 0x04 ? 1 : 2;
+	report[1] = 1;
+	write_le32(report + 4, state->command_sequence);
+	write_le32(report + 8, 1);
+	write_le16(report + 12, 24);
+	write_le32(payload, 24);
+	memcpy(payload + 4, "CNYS", 4);
+	write_le32(payload + 12, 3);
+	write_le16(payload + 16, 1);
+	write_le16(payload + 18, 0x8001);
+	result = send_report(state, endpoint, report);
+	if (result == 0) {
+		advance_transport_state(state, endpoint, report);
+		state->acked_remote_session = state->remote_session;
+		state->sync_reply_pending = false;
+		state->session_confirmed = state->peer_confirmed &&
+			state->remote_session != SESSION_UNKNOWN;
+	}
+	return result;
+}
+
+static int negotiate_session(struct actions_context *state)
+{
+	uint64_t deadline = monotonic_nanoseconds() + SESSION_SYNC_TIMEOUT_NS;
+	uint64_t next_send = 0;
+	uint64_t now_ns;
+	unsigned int attempt;
+	unsigned int sends = 0;
+	int result = 0;
+
+	for (attempt = 0; attempt < MAX_SESSION_SYNC_POLLS && result == 0 &&
+	     !state->session_confirmed; ++attempt) {
+		now_ns = monotonic_nanoseconds();
+		if (now_ns >= deadline) {
+			break;
+		}
+		if (sends < MAX_SESSION_SYNC_SENDS &&
+		    (state->sync_reply_pending || now_ns >= next_send)) {
+			result = send_sync_report(state);
+			++sends;
+			next_send = now_ns + SESSION_SYNC_RETRY_NS;
+		}
+		if (result == 0) {
+			result = poll_hid_inputs(state, now_ns);
+		}
+		if (result == 0 && !state->session_confirmed) {
+			result = sleep_microseconds(50000U);
+		}
+	}
+	if (result == 0 && !state->session_confirmed) {
+		result = -ETIMEDOUT;
+	}
+	fprintf(stderr,
+		"actions-micro: session sync %s local=%04x remote=%04x "
+		"peer-confirmed=%u sends=%u\n",
+		result == 0 ? "confirmed" : "failed", state->local_session,
+		state->remote_session, state->peer_confirmed ? 1U : 0U, sends);
 	return result;
 }
 
@@ -1682,7 +1882,6 @@ static int send_video_message(struct actions_context *state,
 			      const unsigned char *video_data,
 			      size_t video_bytes)
 {
-	static const unsigned char protocol_id[4] = {0x29, 0x00, 0x67, 0x45};
 	unsigned char report[HID_REPORT_LENGTH];
 	unsigned char *message;
 	size_t message_bytes;
@@ -1709,7 +1908,8 @@ static int send_video_message(struct actions_context *state,
 	}
 	write_le32(message, (uint32_t)message_bytes);
 	memcpy(message + 4, "RRIM", 4);
-	memcpy(message + 8, protocol_id, sizeof(protocol_id));
+	write_le16(message + 8, state->local_session);
+	write_le16(message + 10, state->remote_session);
 	write_le32(message + 12, 3);
 	memcpy(message + 16, "TADV", 4);
 	write_le32(message + 20, 0);
@@ -1972,6 +2172,14 @@ static int actions_open(const struct usbdisplay_backend_config *config,
 	state->encoder.format = USBDISPLAY_FORMAT_INVALID;
 	state->width = config->device_width;
 	state->height = config->device_height;
+	/* A new host session makes daemon restarts independent of old capture IDs. */
+	state->local_session = (uint16_t)(monotonic_nanoseconds() ^ (uint64_t)getpid());
+	if (state->local_session == SESSION_UNKNOWN) {
+		state->local_session = 1;
+	}
+	state->remote_session = SESSION_UNKNOWN;
+	state->acked_remote_session = SESSION_UNKNOWN;
+	state->next_command_endpoint = 0x03;
 	result = parse_options(config->option, &state->options);
 	if (result == 0) {
 		result = load_template(state);
@@ -2001,9 +2209,11 @@ static int actions_open(const struct usbdisplay_backend_config *config,
 		if (state->options.full_bootstrap) {
 			/* usbfs 复位不切断 VBUS，重开时必须避免模板传输序号回退。 */
 			prepare_transport_sequence_resume(state);
-			result = send_full_bootstrap(state);
-		} else {
-			result = send_initialization(state);
+		}
+		result = negotiate_session(state);
+		if (result == 0) {
+			result = state->options.full_bootstrap ?
+				send_full_bootstrap(state) : send_initialization(state);
 		}
 	}
 	if (result == 0) {

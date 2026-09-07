@@ -6,7 +6,7 @@ set -eu
 program=${0##*/}
 backend=
 template_file=
-bootstrap_mode=full
+bootstrap_mode=none
 ppm_output=/tmp/usbdisplay.ppm
 display_width=1920
 display_height=1080
@@ -32,7 +32,7 @@ Install USBDisplayStack without using a network package source.
 
   --backend NAME       actions-micro, null, or ppm
   --template PATH      authorized Actions Micro replay template
-  --bootstrap MODE     minimal or full (default: full)
+  --bootstrap MODE     none or full (default: none; minimal aliases none)
   --ppm-output PATH    PPM diagnostic output (default: /tmp/usbdisplay.ppm)
   --width PIXELS       virtual display width (default: 1920)
   --height PIXELS      virtual display height (default: 1080)
@@ -159,8 +159,9 @@ is_non_negative_integer "$wait_seconds" ||
 	fail 'wait time must be a non-negative integer of at most five digits'
 
 case "$bootstrap_mode" in
-	minimal|full) ;;
-	*) fail 'bootstrap mode must be minimal or full' ;;
+	minimal) bootstrap_mode=none ;;
+	none|full) ;;
+	*) fail 'bootstrap mode must be none, minimal, or full' ;;
 esac
 case "$backend" in
 	''|null|ppm|actions-micro) ;;

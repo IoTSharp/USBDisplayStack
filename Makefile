@@ -22,6 +22,7 @@ check:
 	sh tests/test-package-deb.sh
 	sh tests/test-splash-preview.sh
 	sh tests/test-daemon-splash.sh
+	sh tests/test-actions-session.sh
 
 clean:
 	$(MAKE) -C userspace BUILD_DIR=$(BUILD_DIR) clean

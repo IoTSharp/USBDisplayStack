@@ -99,10 +99,12 @@ can be pinned when required:
 template=PATH,hid0=/dev/hidraw2,hid1=/dev/hidraw3,encoder=ffmpeg,fps=30,fragment-us=500,encode-timeout-ms=2000,bootstrap=none
 ```
 
-Some firmware revisions do not leave their waiting page after the command-only
-initialization. For those devices, `bootstrap=full` explicitly sends the entire
-authorized replay once, preserving its timing, command sequence, video
-sequence, and alternating-HID position. The next live configuration and IDR
+Before live session negotiation was implemented, some sessions did not leave
+the waiting page after command-only initialization. `bootstrap=full` remains
+an explicit diagnostic mode that sends the authorized captured video once,
+preserving its timing, video sequence, and alternating-HID position. Captured
+SYNC is replaced by negotiation, session IDs are updated, and command sequences
+continue after the handshake. The next live configuration and IDR
 messages continue in the same transport session, and keepalives resume from the
 captured cycle with command endpoints continuing to alternate. This mode sends
 the captured screen data contained in the template and is therefore never
@@ -298,20 +300,21 @@ with a 39-byte payload. Only the outer sequence changed in the two samples:
 | --- | --- | --- |
 | Device to host / `0x50494e47` (`PING`) | Earlier 24-byte control payloads | Video acceptance or presentation |
 | Device to host / `0x53594e43` (`SYNC`) | Repeated 39-byte control payloads in this incident | Required response, session fields, or video state |
-| Host to device / `0x53594e43` (`SYNC`) | Three fixed 24-byte payloads at the start of the template | Relationship to the live device's reply |
+| Host to device / `0x53594e43` (`SYNC`) | Two discovery requests, then acknowledgement of captured device session `0x4567` | Whether that old session still belongs to the attached device |
 
-The template's first three host `SYNC` payloads are identical:
+The template's first two host `SYNC` payloads advertise local session `0x0029`
+and unknown peer `0xffff`. The third acknowledges the captured peer `0x4567`:
 
 ```text
 18 00 00 00 43 4e 59 53 29 00 ff ff 03 00 00 00
 01 00 01 80 00 00 00 00
+
+18 00 00 00 43 4e 59 53 29 00 67 45 03 00 00 00
+01 00 01 80 00 00 00 00
 ```
 
-The backend currently counts device inputs without interpreting their payloads.
-Do not infer an ACK format or send guessed responses from the tag alone. A
-successful bidirectional capture or the vendor's protocol implementation is
-needed to establish the expected handshake and compare it with this stalled
-session. The bounded sample can be
+At the time of this failed test, the backend counted device inputs without
+interpreting their payloads. The bounded sample can be
 reproduced after verifying the current input0 node (the output is truncated to
 exclude the serial-number field):
 
@@ -319,3 +322,44 @@ exclude the serial-number field):
 timeout 8s dd if=/dev/hidraw0 bs=511 count=2 status=none |
   od -An -v -tx1 -w511 | cut -c1-90
 ```
+
+### Vendor implementation and session mismatch
+
+The adapter's read-only virtual CD-ROM `/dev/sr0` contains `/UDISPLAY.EXE;1`.
+The 7,755,672-byte PE32 executable has SHA-256
+`0ebe9b36555e8676f6b6bce31bd310fc6486f579d47f0e57ac49b0e6e6e4e8d2` and
+PE build timestamp 2024-07-23 11:40:30. It was inspected statically, not run.
+Import-table evidence includes HID descriptor APIs, `ReadFile`, `WriteFile`,
+`DeviceIoControl`, registry and process APIs, and Winsock/WinHTTP APIs.
+
+With radare2 6.2.0, `rabin2 -ij UDisplay.exe` reproduces the import inventory.
+`radare2 -q -e scr.color=0 -c 'pd 80 @ 0x54fe30' UDisplay.exe` shows the
+SGUP v3 SYNC sender. It writes two 16-bit object fields into message offsets
+8 and 10 and logs `send sync. localSsid:0x%04x remoteSsid:0x%04x`.
+Related protocol strings include `remote session change, resync` and
+`ssid diff, ignore`. These establish session IDs rather than constant magic.
+
+All commands after discovery in the template carry `29 00 67 45`. The Linux
+live-video sender also hardcoded these same four bytes as `protocol_id`.
+The attached device instead advertised session `0x23c6`, with peer `0xffff`.
+Consequently, successful HID writes were transmitting messages for an old
+session without completing the attached device's synchronization.
+
+The backend now negotiates a fresh host session before replaying initialization,
+requires the device to echo the host ID, and acknowledges the device ID. The
+confirmation may be a matching `RRIM` video request rather than a separate
+SYNC echo, as observed on lane 179.
+Negotiation is bounded by five seconds, 100 polls, and 12 sends. Captured SYNC
+reports are replaced by this exchange; command sequence numbers continue after
+it. Initialization, heartbeats, bootstrap video, and live video use the negotiated
+IDs. Only the first fragment contains a session header; continuation bytes are
+preserved. A later SYNC announcing changed IDs returns `ESTALE`, causing the
+daemon to reopen, negotiate, and deliver the retained framebuffer again.
+
+At 15:47:21 CST, lane 179 confirmed a live session using an `RRIM` response
+with host ID `0x14a0` and device ID `0x5cff`. After live video began, the
+operator confirmed that the physical screen displayed LaneApp. A later
+`bootstrap=none` restart negotiated different IDs and sent fresh configuration
+and IDR messages without replaying captured video. At 15:51:51, a controlled
+fb1 reload submitted the restored daemon splash; LaneApp resumed five seconds
+later. The primary `fb0=inteldrmfb` remained present throughout both tests.
