@@ -1,5 +1,6 @@
 [Unit]
 Description=USBDisplayStack frame transport daemon
+StartLimitIntervalSec=0
 After=systemd-modules-load.service
 
 [Service]

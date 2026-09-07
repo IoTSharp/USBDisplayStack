@@ -30,6 +30,7 @@ for required in \
 done
 
 grep -Fq 'TimeoutStartSec=10s' "$service"
+grep -Fq 'StartLimitIntervalSec=0' "$service"
 grep -Fq 'ExecStartPre=/usr/bin/usbdisplay-load' "$service"
 grep -Fq 'RestartSec=2' "$service"
 if grep -Fxq 'usbdisplay' "$modules"; then
