@@ -26,6 +26,7 @@
 #define DEFAULT_READY_FILE "/run/usbdisplay/ready"
 #define IDLE_FRAME_REFRESH_NS 2000000000ULL
 #define STARTUP_FRAME_INTERVAL_MS 33
+#define STARTUP_SPLASH_HOLD_NS 2000000000ULL
 
 static volatile sig_atomic_t stop_requested;
 
@@ -276,22 +277,25 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 {
 	struct pollfd descriptor;
 	struct usbdisplay_update update;
+	struct usbdisplay_update pending_update = {0};
 	struct usbdisplay_frame frame;
+	struct usbdisplay_frame splash_frame;
 	ssize_t bytes_read;
 	int poll_result;
 	uint64_t now_ns = 0;
 	uint64_t last_submit_ns = 0;
+	uint64_t startup_hold_until_ns = 0;
 	uint64_t refresh_interval_ns;
 	int poll_interval_ms;
 	uint32_t *splash_pixels = NULL;
 	size_t splash_bytes = 0;
 	bool frame_valid = false;
-	bool startup_splash_submitted = false;
+	bool update_pending = false;
 	bool physical_backend = (backend->capabilities &
 			USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0;
 	int result = 0;
 
-	/* Only INITIAL uses the startup splash; retained application frames win. */
+	/* The splash is transport-local; fb1 remains owned by its application. */
 	splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
 	if (splash_bytes == 0) {
 		result = -EOVERFLOW;
@@ -324,13 +328,17 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 		frame.source = USBDISPLAY_SOURCE_INITIAL;
 		frame.damage_width = info->width;
 		frame.damage_height = info->height;
+		splash_frame = frame;
 		result = backend->submit(backend_context, &frame);
 		if (result == 0) {
-			startup_splash_submitted = true;
 			frame_valid = true;
 			last_submit_ns = monotonic_nanoseconds();
+			if (physical_backend) {
+				startup_hold_until_ns = last_submit_ns + STARTUP_SPLASH_HOLD_NS;
+			}
 			fprintf(stderr,
-				"usb-displayd: startup splash submitted at generation start\n");
+				"usb-displayd: startup splash submitted at generation start hold-ms=%llu\n",
+				physical_backend ? STARTUP_SPLASH_HOLD_NS / 1000000ULL : 0ULL);
 		}
 	}
 	descriptor.fd = device_fd;
@@ -342,6 +350,9 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			frame.source == USBDISPLAY_SOURCE_INITIAL ?
 			STARTUP_FRAME_INTERVAL_MS : BACKEND_TICK_INTERVAL_MS;
 		poll_result = poll(&descriptor, 1, poll_interval_ms);
+		if (stop_requested) {
+			break;
+		}
 		if (poll_result < 0) {
 			if (errno != EINTR) {
 				result = -errno;
@@ -356,56 +367,14 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 				result = -EPROTO;
 			} else {
 				result = validate_update(info, &update);
-				if (result == 0) {
-					uint32_t previous_source = frame.source;
-					if (update.source == USBDISPLAY_SOURCE_INITIAL &&
-					    startup_splash_submitted) {
-						/* The generation-start splash already represents INITIAL. */
-						continue;
-					}
-					memset(&frame, 0, sizeof(frame));
-					frame.struct_size = sizeof(frame);
-					if (update.source == USBDISPLAY_SOURCE_INITIAL) {
-						frame.pixels = splash_pixels;
-						frame.bytes = splash_bytes;
-						frame.width = info->width;
-						frame.height = info->height;
-						frame.stride = info->width * 4U;
-						frame.format = USBDISPLAY_FORMAT_XRGB8888;
-						frame.damage_width = info->width;
-						frame.damage_height = info->height;
-					} else {
-						frame.pixels = (const char *)mapping +
-							       ((size_t)update.slot * info->slot_bytes);
-						frame.bytes = (size_t)update.stride * update.height;
-						frame.width = update.width;
-						frame.height = update.height;
-						frame.stride = update.stride;
-						frame.format = update.format;
-						frame.damage_x = update.damage_x;
-						frame.damage_y = update.damage_y;
-						frame.damage_width = update.damage_width;
-						frame.damage_height = update.damage_height;
-					}
-					frame.sequence = update.sequence;
-					frame.timestamp_ns = update.timestamp_ns;
-					frame.source = update.source;
-					result = backend->submit(backend_context, &frame);
-					if (result == 0) {
-						if (!frame_valid && update.source ==
-						    USBDISPLAY_SOURCE_INITIAL) {
-							fprintf(stderr,
-								"usb-displayd: startup splash submitted to backend\n");
-						}
-						if (frame_valid && previous_source != update.source) {
-							fprintf(stderr,
-								"usb-displayd: frame source transition %u -> %u sequence=%llu\n",
-								previous_source, update.source,
-								(unsigned long long)update.sequence);
-						}
-						frame_valid = true;
-						last_submit_ns = monotonic_nanoseconds();
-					}
+				if (result == 0 && update.source == USBDISPLAY_SOURCE_INITIAL) {
+					/* Reading INITIAL also releases any previously held application slot. */
+					update_pending = false;
+					frame = splash_frame;
+				} else if (result == 0) {
+					/* Each read pins the newest slot until the next read. */
+					pending_update = update;
+					update_pending = true;
 				}
 			}
 		} else if (poll_result > 0 &&
@@ -413,6 +382,44 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			result = -EIO;
 		}
 		now_ns = monotonic_nanoseconds();
+		if (result == 0 && update_pending && now_ns >= startup_hold_until_ns) {
+			uint32_t previous_source = frame.source;
+
+			memset(&frame, 0, sizeof(frame));
+			frame.struct_size = sizeof(frame);
+			frame.pixels = (const char *)mapping +
+				       ((size_t)pending_update.slot * info->slot_bytes);
+			frame.bytes = (size_t)pending_update.stride * pending_update.height;
+			frame.width = pending_update.width;
+			frame.height = pending_update.height;
+			frame.stride = pending_update.stride;
+			frame.format = pending_update.format;
+			frame.damage_x = pending_update.damage_x;
+			frame.damage_y = pending_update.damage_y;
+			frame.damage_width = pending_update.damage_width;
+			frame.damage_height = pending_update.damage_height;
+			if (previous_source == USBDISPLAY_SOURCE_INITIAL) {
+				/* Damage from skipped startup updates must not leave splash pixels. */
+				frame.damage_x = 0;
+				frame.damage_y = 0;
+				frame.damage_width = frame.width;
+				frame.damage_height = frame.height;
+			}
+			frame.sequence = pending_update.sequence;
+			frame.timestamp_ns = pending_update.timestamp_ns;
+			frame.source = pending_update.source;
+			result = backend->submit(backend_context, &frame);
+			if (result == 0) {
+				if (previous_source != frame.source) {
+					fprintf(stderr,
+						"usb-displayd: frame source transition %u -> %u sequence=%llu\n",
+						previous_source, frame.source,
+						(unsigned long long)frame.sequence);
+				}
+				update_pending = false;
+				last_submit_ns = monotonic_nanoseconds();
+			}
+		}
 		refresh_interval_ns = frame_valid &&
 			frame.source == USBDISPLAY_SOURCE_INITIAL ?
 			(uint64_t)STARTUP_FRAME_INTERVAL_MS * 1000000ULL :

@@ -48,18 +48,19 @@ structure sizes and an ABI version so fields can be appended without forcing
 unrelated backends to change.
 
 Backends may request a periodic `tick` callback. This keeps control traffic
-alive even when fbdev or DRM has not published a new frame. Physical backends
-never replace the current framebuffer image with a daemon splash during
-reconnect; the latest fbdev snapshot is replayed when the stream is reopened.
+alive even when fbdev or DRM has not published a new frame. After each
+successful physical backend generation open, `usb-displayd` submits the
+USBDisplayStack `CONNECTED / WAITING FOR APPLICATION` startup splash for at
+least two seconds while the transport warms up. The hold does not block
+heartbeats or shutdown; once it expires, the newest pending fbdev or DRM
+snapshot takes over immediately. Updates received during the hold are
+coalesced, so historical framebuffer images are never replayed.
 
-Before the first application frame, an `INITIAL` update displays the existing
-USBDisplayStack `CONNECTED / WAITING FOR APPLICATION` startup splash, including
-on physical backends. The next fbdev or DRM update takes over immediately.
-Closing an application retains its last frame; restarting the transport does
-not replace that retained frame with the startup splash. This splash is drawn
-by the daemon's pixel renderer, independently of LVGL. Sending it still requires
-a working physical video session; it cannot replace the adapter's firmware page
-when the firmware has not accepted video.
+The lane 179 operator confirmed that this daemon-rendered splash is visibly
+shown before LaneApp resumes. It is drawn independently of LVGL and applies on
+every backend generation, including reconnects. Sending it still requires a
+working physical video session; it cannot replace the adapter's firmware page
+while the firmware has not accepted video.
 
 The Actions Micro backend negotiates SGUP v3 local and remote session IDs
 before initialization. Those IDs are included in every command, heartbeat,
