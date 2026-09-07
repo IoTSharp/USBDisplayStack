@@ -21,6 +21,7 @@ check:
 	sh tests/test-usbdisplay-load.sh
 	sh tests/test-package-deb.sh
 	sh tests/test-splash-preview.sh
+	sh tests/test-daemon-splash.sh
 
 clean:
 	$(MAKE) -C userspace BUILD_DIR=$(BUILD_DIR) clean

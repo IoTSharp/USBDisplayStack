@@ -287,19 +287,17 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 			USBDISPLAY_BACKEND_CAP_PHYSICAL) != 0;
 	int result = 0;
 
-	/* Physical output must preserve the current fb1 image during reconnects. */
-	if (!physical_backend) {
-		splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
-		if (splash_bytes == 0) {
-			result = -EOVERFLOW;
+	/* Only INITIAL uses the startup splash; retained application frames win. */
+	splash_bytes = usbdisplay_splash_bytes(info->width, info->height);
+	if (splash_bytes == 0) {
+		result = -EOVERFLOW;
+	} else {
+		splash_pixels = malloc(splash_bytes);
+		if (splash_pixels == NULL) {
+			result = -ENOMEM;
 		} else {
-			splash_pixels = malloc(splash_bytes);
-			if (splash_pixels == NULL) {
-				result = -ENOMEM;
-			} else {
-				result = usbdisplay_splash_render(splash_pixels, info->width,
-							      info->height, info->width * 4U);
-			}
+			result = usbdisplay_splash_render(splash_pixels, info->width,
+						      info->height, info->width * 4U);
 		}
 	}
 	descriptor.fd = device_fd;
@@ -321,9 +319,7 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 				result = -EPROTO;
 			} else {
 				result = validate_update(info, &update);
-				if (result == 0 &&
-				    (update.source != USBDISPLAY_SOURCE_INITIAL ||
-				     !physical_backend)) {
+				if (result == 0) {
 					memset(&frame, 0, sizeof(frame));
 					frame.struct_size = sizeof(frame);
 					if (update.source == USBDISPLAY_SOURCE_INITIAL) {
@@ -353,6 +349,11 @@ static int run_loop(int device_fd, const struct usbdisplay_device_info *info,
 					frame.source = update.source;
 					result = backend->submit(backend_context, &frame);
 					if (result == 0) {
+						if (!frame_valid && update.source ==
+						    USBDISPLAY_SOURCE_INITIAL) {
+							fprintf(stderr,
+								"usb-displayd: startup splash submitted to backend\n");
+						}
 						frame_valid = true;
 						last_submit_ns = monotonic_nanoseconds();
 					}

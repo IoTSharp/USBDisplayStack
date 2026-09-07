@@ -52,6 +52,15 @@ alive even when fbdev or DRM has not published a new frame. Physical backends
 never replace the current framebuffer image with a daemon splash during
 reconnect; the latest fbdev snapshot is replayed when the stream is reopened.
 
+Before the first application frame, an `INITIAL` update displays the existing
+USBDisplayStack `CONNECTED / WAITING FOR APPLICATION` startup splash, including
+on physical backends. The next fbdev or DRM update takes over immediately.
+Closing an application retains its last frame; restarting the transport does
+not replace that retained frame with the startup splash. This splash is drawn
+by the daemon's pixel renderer, independently of LVGL. Sending it still requires
+a working physical video session; it cannot replace the adapter's firmware page
+when the firmware has not accepted video.
+
 The daemon publishes a readiness file after the backend opens. The file carries
 the live daemon PID, a positive transport `generation`, and `physical=1` only
 for a backend that owns a physical display transport; diagnostic backends
